@@ -73,3 +73,31 @@ test('date formatting safely handles missing and invalid dates', () => {
   assert.equal(formatDate('not-a-date'), 'not-a-date');
   assert.match(formatDate('2026-10-27'), /27/);
 });
+
+test('normalization preserves editor-only line costs without adding them to the quote total', () => {
+  const db = normalizeDb({
+    quotes: [{
+      number: 'P 08.26', client: 'Mario Rossi', net: 100, vatRate: 10, total: 110,
+      lines: [{ id: 'line-1', desc: 'Installazione', internalPrice: 23.5 }],
+    }],
+  });
+  assert.equal(db.quotes[0].lines[0].internalPrice, 23.5);
+  assert.equal(calcTotal(db.quotes[0]).total, 110);
+});
+
+test('normalization preserves deleted items and confirmed category templates without schema changes', () => {
+  const entry = { id: 'trash-1', type: 'quote', label: 'P 01.26 · Cliente', deletedAt: '2026-10-28T10:00:00.000Z', data: { id: 'q1', number: 'P 01.26', client: 'Cliente' } };
+  const template = { confirmed: true, confirmedAt: '2026-10-28T10:00:00.000Z', lines: ['Installazione quadro', 'Verifica impianto'] };
+  const db = normalizeDb({ quotes: [], clients: [], items: [], trash: [entry], settings: { categoryTemplates: { 'Impianto elettrico': template } } });
+  assert.equal(db.trash.length, 1);
+  assert.equal(db.trash[0].data.id, 'q1');
+  assert.deepEqual(db.settings.categoryTemplates['Impianto elettrico'].lines, template.lines);
+  assert.equal(db.settings.categoryTemplates['Impianto elettrico'].confirmed, true);
+});
+
+test('normalization ignores malformed trash entries but keeps valid workspace data', () => {
+  const db = normalizeDb({ quotes: [{ id: 'q1', client: 'Mario', lines: [] }], trash: [null, { type: 'unknown', data: {} }, { type: 'client', data: { name: 'Anna' } }] });
+  assert.equal(db.quotes.length, 1);
+  assert.equal(db.trash.length, 1);
+  assert.equal(db.trash[0].type, 'client');
+});
