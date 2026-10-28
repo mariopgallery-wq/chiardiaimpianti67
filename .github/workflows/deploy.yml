@@ -29,19 +29,34 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Install dependencies (with network retries)
+        timeout-minutes: 15
+        run: |
+          set -e
+          for attempt in 1 2 3; do
+            echo "Installazione dipendenze, tentativo ${attempt}/3"
+            if npm install --no-audit --no-fund --prefer-online --fetch-retries=5 --fetch-timeout=120000; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Errore: impossibile installare le dipendenze npm dopo 3 tentativi."
+              exit 1
+            fi
+            sleep 10
+          done
+          npm ls --depth=0
 
       - name: Run tests
         run: npm test
 
-      - name: Compile React application
+      - name: Compile React application with Vite
         run: npm run build
 
       - name: Verify compiled files
         run: |
           test -s dist/index.html
           test -d dist/assets
+          find dist/assets -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -size +0c | grep -q .
           if grep -q 'src/main.jsx' dist/index.html; then
             echo "Errore: React non è stato compilato"
             exit 1
