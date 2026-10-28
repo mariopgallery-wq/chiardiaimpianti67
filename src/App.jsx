@@ -10,6 +10,7 @@ import { supabase } from './lib/supabase.js';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import mammoth from 'mammoth/mammoth.browser';
+import { createWorker } from 'tesseract.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 import { CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal, money, formatDate, todayISO, quoteNumber, newDraft, escapeName } from './lib/domain.js';
@@ -17,20 +18,205 @@ import { parseQuoteText } from './lib/importQuote.js';
 
 const LOGO_URL = './logo-chiaradia.png';
 
+function wordHtmlToLayout(html) {
+  // Mammoth preserva la gerarchia di paragrafi e tabelle DOCX, ma non le coordinate
+  // della pagina. Ricostruiamo le colonne delle celle e l'ordine verticale per riusare
+  // lo stesso parser di testata/corpo/footer usato per i PDF.
+  const parsed = new DOMParser().parseFromString(String(html || ''), 'text/html');
+  const blocks = [];
+  const textOf = (node) => String(node?.textContent || '').replace(/[\t\r\n\u00a0]+/g, ' ').replace(/\s+/g, ' ').trim();
+  for (const child of Array.from(parsed.body.children)) {
+    if (child.tagName === 'TABLE') {
+      for (const row of Array.from(child.querySelectorAll('tr'))) {
+        const cells = Array.from(row.children).filter(cell => cell.tagName === 'TD' || cell.tagName === 'TH');
+        const values = cells.map(textOf);
+        if (!values.some(Boolean)) continue;
+        const segments = values.map((text, index) => {
+          const x = values.length <= 1 ? 0.08 : 0.08 + (0.84 * index) / (values.length - 1);
+          return { text, x, xEnd: Math.min(0.98, x + (values.length <= 1 ? 0.84 : 0.34)), fontSize: 10 };
+        }).filter(segment => segment.text);
+        blocks.push({ text: values.filter(Boolean).join(' '), segments, x: Math.min(...segments.map(segment => segment.x)), fontSize: 10 });
+      }
+      continue;
+    }
+    const contentNodes = child.matches('p,h1,h2,h3,h4,h5,h6,li')
+      ? [child]
+      : Array.from(child.querySelectorAll(':scope > p, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > ul > li, :scope > ol > li'));
+    for (const node of contentNodes) {
+      const text = textOf(node);
+      if (text) blocks.push({ text, segments: [{ text, x: 0.08, xEnd: 0.92, fontSize: 10 }], x: 0.08, fontSize: 10 });
+    }
+  }
+  const lastIndex = Math.max(1, blocks.length - 1);
+  return blocks.map((block, index) => ({
+    ...block, page: 1, yNorm: 0.08 + (0.84 * index) / lastIndex, top: 80 + index * 12,
+  }));
+}
+
 async function extractDocumentText(file) {
   const ext = file.name.toLowerCase().split('.').pop();
   if (ext === 'pdf') {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
     const pages = [];
-    for (let i = 1; i <= pdf.numPages; i++) { const page = await pdf.getPage(i); const content = await page.getTextContent(); let line = ''; let previousY = null; const pageLines = []; for (const item of content.items) { if (!('str' in item)) continue; const y = item.transform?.[5]; if (previousY !== null && y !== previousY) { pageLines.push(line); line = ''; } line += `${line ? ' ' : ''}${item.str}`; previousY = y; } if (line) pageLines.push(line); pages.push(pageLines.join('\n')); }
-    const text = pages.join('\n'); if (!text.trim()) throw new Error('Il PDF non contiene testo selezionabile. Sembra una scansione: serve OCR o un PDF con testo.'); return text;
+    const layoutLines = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1 });
+      const content = await page.getTextContent({ includeMarkedContent: false });
+      const items = content.items.filter(item => typeof item.str === 'string' && item.str.trim()).map(item => {
+        const transform = item.transform || [1, 0, 0, 10, 0, 0];
+        const fontSize = Math.max(1, Math.hypot(Number(transform[0]) || 0, Number(transform[1]) || Number(transform[3]) || 10));
+        const xPoints = Number(transform[4]) || 0;
+        const baselineY = viewport.height - (Number(transform[5]) || 0);
+        const widthPoints = Math.max(0, Number(item.width) || 0);
+        return {
+          text: item.str.replace(/\u00a0/g, ' ').trim(),
+          xPoints,
+          x: Math.max(0, xPoints / Math.max(1, viewport.width)),
+          xEnd: Math.max(0, (xPoints + widthPoints) / Math.max(1, viewport.width)),
+          top: baselineY,
+          yNorm: Math.max(0, Math.min(1, baselineY / Math.max(1, viewport.height))),
+          fontSize,
+          page: pageNumber,
+        };
+      }).sort((a, b) => a.top - b.top || a.xPoints - b.xPoints);
+
+      // Raggruppa gli elementi sulla stessa riga fisica senza perdere le coordinate
+      // orizzontali: il parser può così distinguere cliente a sinistra e riferimenti a destra.
+      const grouped = [];
+      for (const item of items) {
+        let row = grouped.find(candidate => Math.abs(candidate.top - item.top) <= Math.max(2.4, Math.min(candidate.fontSize, item.fontSize) * 0.32));
+        if (!row) {
+          row = { page: pageNumber, top: item.top, yNorm: item.yNorm, fontSize: item.fontSize, segments: [] };
+          grouped.push(row);
+        }
+        row.segments.push(item);
+        row.top = row.segments.reduce((sum, segment) => sum + segment.top, 0) / row.segments.length;
+        row.yNorm = row.top / Math.max(1, viewport.height);
+        row.fontSize = Math.max(row.fontSize, item.fontSize);
+      }
+      const pageLines = grouped.map(row => {
+        const segments = row.segments.sort((a, b) => a.xPoints - b.xPoints).map(segment => ({
+          text: segment.text,
+          x: segment.x,
+          xEnd: segment.xEnd,
+          fontSize: segment.fontSize,
+        }));
+        let text = '';
+        let previous = null;
+        for (const segment of segments) {
+          if (text && previous) {
+            const gapPoints = (segment.x * viewport.width) - (previous.xEnd * viewport.width);
+            const alreadySpace = /\s$/.test(text) || /^\s/.test(segment.text);
+            if (!alreadySpace && gapPoints > Math.max(1.4, Math.min(previous.fontSize, segment.fontSize) * 0.18)) text += ' ';
+          }
+          text += segment.text;
+          previous = segment;
+        }
+        return {
+          text: text.replace(/\s+/g, ' ').trim(),
+          x: segments.length ? Math.min(...segments.map(segment => segment.x)) : 0,
+          xEnd: segments.length ? Math.max(...segments.map(segment => segment.xEnd)) : 0,
+          top: row.top,
+          yNorm: row.yNorm,
+          fontSize: row.fontSize,
+          page: pageNumber,
+          segments,
+        };
+      }).filter(row => row.text).sort((a, b) => a.top - b.top);
+      layoutLines.push(...pageLines);
+      pages.push(pageLines.map(line => line.text).join('\n'));
+    }
+    let text = pages.join('\n');
+    let ocrUsed = false;
+    if (!text.trim() || (layoutLines.length < 10 && !/\bARTICOLO\b/i.test(text))) {
+      // PDF da scanner/fotocamera: OCR locale nel browser, con coordinate delle parole
+      // per conservare la separazione sinistra/destra della testata del preventivo.
+      let worker;
+      try {
+        worker = await createWorker('ita+eng');
+        const ocrLayout = [];
+        const ocrPages = [];
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+          const page = await pdf.getPage(pageNumber);
+          const scale = 1.8;
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const context = canvas.getContext('2d', { willReadFrequently: true });
+          if (!context) throw new Error('Il browser non permette di creare il canvas necessario al riconoscimento OCR.');
+          await page.render({ canvasContext: context, viewport }).promise;
+          const result = await worker.recognize(canvas);
+          const lines = (result?.data?.lines || []).filter(line => line.text?.trim()).map(line => {
+            const box = line.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 };
+            const segments = (line.words || []).filter(word => word.text?.trim()).map(word => {
+              const wordBox = word.bbox || box;
+              return {
+                text: word.text.trim(),
+                x: Math.max(0, Math.min(1, wordBox.x0 / Math.max(1, canvas.width))),
+                xEnd: Math.max(0, Math.min(1, wordBox.x1 / Math.max(1, canvas.width))),
+                fontSize: Math.max(1, (wordBox.y1 - wordBox.y0) / scale),
+              };
+            });
+            return {
+              text: line.text.trim(),
+              x: Math.max(0, Math.min(1, box.x0 / Math.max(1, canvas.width))),
+              xEnd: Math.max(0, Math.min(1, box.x1 / Math.max(1, canvas.width))),
+              top: box.y0 / scale,
+              yNorm: Math.max(0, Math.min(1, box.y0 / Math.max(1, canvas.height))),
+              fontSize: Math.max(1, (box.y1 - box.y0) / scale),
+              page: pageNumber,
+              segments,
+            };
+          });
+          ocrLayout.push(...lines);
+          ocrPages.push(lines.map(line => line.text).join('\n'));
+          canvas.width = 1; canvas.height = 1;
+        }
+        // Se il PDF conteneva già un po' di testo, non duplicarlo: OCR è fallback solo
+        // quando il testo selezionabile manca o è solo parziale. Scegliamo la mappa OCR
+        // se ha recuperato la struttura tabellare oppure ha nettamente più testo utile.
+        const ocrText = ocrPages.join('\n');
+        const originalHasTable = /\bARTICOLO\b/i.test(text);
+        const ocrHasTable = /\bARTICOLO\b/i.test(ocrText);
+        const useOcr = !text.trim() || (ocrText.trim() && ((ocrHasTable && !originalHasTable) || ocrText.trim().length > text.trim().length * 1.4));
+        if (useOcr && ocrLayout.length) {
+          text = ocrText;
+          layoutLines.splice(0, layoutLines.length, ...ocrLayout);
+          ocrUsed = true;
+        }
+      } catch (ocrError) {
+        if (!text.trim()) throw new Error(`Il PDF sembra una scansione e il riconoscimento OCR non è riuscito. ${ocrError?.message || 'Controlla la connessione e riprova.'}`);
+      } finally {
+        try { await worker?.terminate(); } catch {}
+      }
+    }
+    if (!text.trim()) throw new Error('Non è stato riconosciuto testo nel PDF. Prova un PDF con testo selezionabile o un DOCX.');
+    return { text, layoutLines, format: 'pdf', ocrUsed };
   }
-  if (ext === 'docx') { const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() }); if (!result.value.trim()) throw new Error('Il documento Word non contiene testo leggibile.'); return result.value; }
+  if (ext === 'docx') {
+    const arrayBuffer = await file.arrayBuffer();
+    const [result, htmlResult] = await Promise.all([
+      mammoth.extractRawText({ arrayBuffer }),
+      mammoth.convertToHtml({ arrayBuffer }),
+    ]);
+    if (!result.value.trim()) throw new Error('Il documento Word non contiene testo leggibile.');
+    const layoutLines = wordHtmlToLayout(htmlResult.value);
+    return { text: result.value, layoutLines, format: 'docx' };
+  }
   if (ext === 'doc') {
-    const buffer = await file.arrayBuffer(); const bytes = new Uint8Array(buffer); const binary = new TextDecoder('windows-1252').decode(bytes); const utf16 = new TextDecoder('utf-16le').decode(bytes); const printable = (s) => s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '\n').replace(/[ ]{2,}/g, ' ').split('\n').map(x => x.trim()).filter(x => x.length > 3 && /[a-zà-ÿ]{3}/i.test(x)).join('\n'); const extracted = [printable(utf16), printable(binary)].sort((a,b) => b.length-a.length)[0]; if (extracted.length < 30) throw new Error('Questo DOC binario non è stato letto in modo affidabile. Aprilo in Word e salvalo come DOCX, quindi importalo di nuovo.'); return extracted;
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const binary = new TextDecoder('windows-1252').decode(bytes);
+    const utf16 = new TextDecoder('utf-16le').decode(bytes);
+    const printable = (value) => value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '\n').replace(/[ ]{2,}/g, ' ').split('\n').map(line => line.trim()).filter(line => line.length > 3 && /[a-zà-ÿ]{3}/i.test(line)).join('\n');
+    const extracted = [printable(utf16), printable(binary)].sort((a, b) => b.length - a.length)[0];
+    if (extracted.length < 30) throw new Error('Questo DOC binario non è stato letto in modo affidabile. Aprilo in Word e salvalo come DOCX, quindi importalo di nuovo.');
+    return { text: extracted, layoutLines: [], format: 'doc' };
   }
-  if (ext === 'txt') return await file.text();
+  if (ext === 'txt') return { text: await file.text(), layoutLines: [], format: 'txt' };
   throw new Error('Formato non supportato. Usa PDF, DOC, DOCX oppure TXT.');
 }
 
@@ -208,7 +394,7 @@ function QuoteDocument({ draft, settings }) {
       <div className="quote-title-text">{draft.title || 'Preventivo per fornitura e posa in opera'}</div>
       {draft.subtitle && <div className="quote-subtitle-text">{draft.subtitle}</div>}
       {draft.intro && <p className="quote-intro">{draft.intro}</p>}
-      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => <li key={line.id}><span>{line.desc}</span>{line.amount !== null && line.amount !== undefined && line.amount !== '' && <strong className="imported-line-amount">{money(line.amount)}</strong>}</li>)}</ul>}
+      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => <li key={line.id}><span>{line.desc}</span></li>)}</ul>}
       {draft.closing && <p className="quote-closing">{draft.closing}</p>}
     </section>
     <footer className="quote-doc-footer">
@@ -376,11 +562,25 @@ export default function App() {
     setUser(null); setReady(false); setCloudReady(false); setSyncState('idle');
   };
 
-  const createQuote = () => {
-    setDraft(newDraft(db)); setView('editor'); setShowMobileMenu(false);
+  const linesForCategory = (category) => {
+    const template = db.settings?.categoryTemplates?.[category];
+    if (template?.confirmed && Array.isArray(template.lines) && template.lines.some(line => String(line || '').trim())) {
+      return template.lines.filter(line => String(line || '').trim()).map((desc, index) => ({ id: `tpl-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 5)}`, desc: String(desc), internalPrice: null }));
+    }
+    return [{ id: `l${Date.now()}`, desc: '', internalPrice: null }];
   };
+  const createQuote = () => {
+    const next = newDraft(db);
+    next.lines = linesForCategory(next.category);
+    setDraft(next); setView('editor'); setShowMobileMenu(false);
+  };
+  const changeDraftCategory = (category) => setDraft(previous => {
+    if (!previous) return previous;
+    const hasTypedDescriptions = previous.lines.some(line => String(line.desc || '').trim());
+    return { ...previous, category, ...(hasTypedDescriptions ? {} : { lines: linesForCategory(category) }) };
+  });
   const editQuote = (quote) => {
-    setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '' }] });
+    setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '', internalPrice: null }] });
     setView('editor'); setShowMobileMenu(false);
   };
   const updateDraft = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
@@ -428,8 +628,8 @@ export default function App() {
       return { ...previous, lines };
     });
   };
-  const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '' }] }));
-  const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '' }] }));
+  const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '', internalPrice: null }] }));
+  const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '', internalPrice: null }] }));
 
   const saveQuote = () => {
     if (!draft.client.trim()) { notify('Inserisci il nome del cliente prima di salvare.'); return; }
@@ -439,7 +639,7 @@ export default function App() {
     const now = new Date().toISOString();
     const quote = { ...draft, id: draft.id || `q-${Date.now()}`, number: draft.number || quoteNumber(db.quotes), client: draft.client.trim(), net: sums.net,
       vatRate: sums.rate, vat: sums.vat, total: sums.total, updated: now,
-      lines: draft.lines.map(line => ({ ...line, desc: line.desc.trim() })).filter(line => line.desc),
+      lines: draft.lines.map(line => { const { amount: legacyAmount, ...rest } = line; const internalPrice = line.internalPrice !== undefined ? line.internalPrice : (legacyAmount ?? null); return { ...rest, internalPrice: internalPrice === '' ? null : (internalPrice == null ? null : Math.max(0, Number(internalPrice) || 0)), desc: String(line.desc || '').trim() }; }).filter(line => line.desc),
     };
     updateDb(previous => {
       const quotes = [...previous.quotes];
@@ -485,10 +685,10 @@ export default function App() {
     notify('Preventivo salvato. Sincronizzazione in corso…');
   };
   const deleteQuote = (quote) => {
-    if (!window.confirm(`Vuoi eliminare il preventivo ${quote.number} di ${quote.client}?`)) return;
-    updateDb(previous => ({ ...previous, quotes: previous.quotes.filter(q => q.id !== quote.id) }));
+    if (!window.confirm(`Spostare nel cestino il preventivo ${quote.number} di ${quote.client}? Potrai ripristinarlo dalle Impostazioni.`)) return;
+    updateDb(previous => ({ ...previous, quotes: previous.quotes.filter(q => q.id !== quote.id), trash: [{ id: `trash-q-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, type: 'quote', label: `${quote.number || 'Preventivo'} · ${quote.client || 'Cliente non indicato'}`, deletedAt: new Date().toISOString(), data: quote }, ...(previous.trash || [])] }));
     if (draft?.id === quote.id) setDraft(null);
-    notify('Preventivo eliminato.');
+    notify('Preventivo spostato nel cestino.');
   };
   const duplicateQuote = (quote) => {
     const copy = { ...quote, id: null, number: quoteNumber(db.quotes), date: todayISO(), status: 'Bozza', lines: (quote.lines || []).map(line => ({ ...line, id: `l${Date.now()}${Math.random()}` })) };
@@ -505,7 +705,11 @@ export default function App() {
     updateDb(previous => ({ ...previous, items: [{ id: `i-${Date.now()}`, cat: category, desc }, ...previous.items] }));
     notify('Voce aggiunta al catalogo.'); return true;
   };
-  const deleteCatalogItem = (item) => updateDb(previous => ({ ...previous, items: previous.items.filter(i => i.id !== item.id) }));
+  const deleteCatalogItem = (item) => {
+    if (!window.confirm(`Spostare nel cestino la voce “${item.desc}”?`)) return;
+    updateDb(previous => ({ ...previous, items: previous.items.filter(i => i.id !== item.id), trash: [{ id: `trash-catalog-${Date.now()}`, type: 'catalog', label: `${item.cat} · ${item.desc}`, deletedAt: new Date().toISOString(), data: item }, ...(previous.trash || [])] }));
+    notify('Voce di catalogo spostata nel cestino.');
+  };
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify({ ...db, version: 2, exportedAt: new Date().toISOString() }, null, 2)], { type: 'application/json' });
     const href = URL.createObjectURL(blob); const link = document.createElement('a');
@@ -514,7 +718,7 @@ export default function App() {
   const importQuoteFile = async (file) => {
     if (!file) return;
     setImportBusy(true);
-    try { const rawText = await extractDocumentText(file); setQuoteImport(parseQuoteText(rawText, file.name, db)); }
+    try { const extracted = await extractDocumentText(file); setQuoteImport(parseQuoteText(extracted.text, file.name, db, { layoutLines: extracted.layoutLines, ocrUsed: extracted.ocrUsed })); }
     catch (error) { notify(error?.message || 'Impossibile leggere il documento.'); }
     finally { setImportBusy(false); }
   };
@@ -525,7 +729,7 @@ export default function App() {
     const existingSameQuote = db.quotes.some(q => String(q.number).trim().toLowerCase() === parsed.number.trim().toLowerCase() && escapeName(q.client) === escapeName(parsed.client));
     if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
     const net = Math.max(0, Number(parsed.total) || 0);
-    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', title: parsed.title || 'Preventivo per fornitura e posa in opera', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), ...(l.amount !== null && l.amount !== undefined ? { amount: Number(l.amount) } : {}) })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
+    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', title: parsed.title || 'Preventivo per fornitura e posa in opera', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
     if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate' }];
     const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
     updateDb(previous => {
@@ -549,8 +753,30 @@ export default function App() {
   };
   const deleteClient = (client) => {
     const linked = db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length;
-    if (!window.confirm(`Eliminare il cliente “${client.name}” dalla rubrica?${linked ? ` I ${linked} preventivi collegati resteranno nell’archivio con il nome salvato.` : ''}`)) return;
-    updateDb(previous => ({ ...previous, clients: previous.clients.filter(c => escapeName(c.name) !== escapeName(client.name)) })); notify('Cliente eliminato dalla rubrica. I preventivi non sono stati eliminati.');
+    if (!window.confirm(`Spostare il cliente “${client.name}” nel cestino?${linked ? ` I ${linked} preventivi collegati resteranno nell’archivio.` : ''}`)) return;
+    updateDb(previous => ({ ...previous, clients: previous.clients.filter(c => escapeName(c.name) !== escapeName(client.name)), trash: [{ id: `trash-client-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, type: 'client', label: client.name, deletedAt: new Date().toISOString(), data: client }, ...(previous.trash || [])] })); notify('Cliente spostato nel cestino. I preventivi non sono stati eliminati.');
+  };
+  const restoreTrashItem = (entry) => {
+    const exists = entry.type === 'quote' ? db.quotes.some(item => item.id === entry.data.id)
+      : entry.type === 'client' ? db.clients.some(item => escapeName(item.name) === escapeName(entry.data.name))
+      : db.items.some(item => item.id === entry.data.id || (item.cat === entry.data.cat && escapeName(item.desc) === escapeName(entry.data.desc)));
+    if (exists) { notify(entry.type === 'client' ? 'Esiste già un cliente con questo nome. Rinominalo o modifica la rubrica prima di ripristinare.' : 'Un elemento equivalente è già presente: non è stato creato un duplicato.'); return; }
+    updateDb(previous => ({ ...previous,
+      quotes: entry.type === 'quote' ? [entry.data, ...previous.quotes] : previous.quotes,
+      clients: entry.type === 'client' ? [entry.data, ...previous.clients] : previous.clients,
+      items: entry.type === 'catalog' ? [entry.data, ...previous.items] : previous.items,
+      trash: (previous.trash || []).filter(item => item.id !== entry.id),
+    }));
+    notify('Elemento ripristinato dal cestino.');
+  };
+  const permanentlyDeleteTrashItem = (entry) => {
+    if (!window.confirm(`Eliminare definitivamente “${entry.label}”? Questa operazione non è reversibile.`)) return;
+    updateDb(previous => ({ ...previous, trash: (previous.trash || []).filter(item => item.id !== entry.id) }));
+    notify('Elemento eliminato definitivamente dal cestino.');
+  };
+  const saveCategoryTemplate = (category, template) => {
+    updateDb(previous => ({ ...previous, settings: { ...previous.settings, categoryTemplates: { ...(previous.settings?.categoryTemplates || {}), [category]: template } } }));
+    notify(template.confirmed ? `Modello predefinito confermato per ${category}.` : `Modello di ${category} aggiornato.`);
   };
   const importBackup = (file) => {
     if (!file) return;
@@ -667,7 +893,7 @@ export default function App() {
             <div className="edit-panel">
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">01</span><div><h2>Dati del documento</h2><p>Numero, settore, data e condizioni</p></div></div>
                 <div className="form-grid form-grid-three"><div className="field"><label htmlFor="q-number">Numero preventivo</label><input id="q-number" value={draft.number} onChange={e => updateDraft('number', e.target.value)} placeholder="P 01.26" /></div><div className="field"><label htmlFor="q-date">Data</label><input id="q-date" type="date" value={draft.date} onChange={e => updateDraft('date', e.target.value)} /></div><div className="field"><label htmlFor="q-status">Stato</label><select id="q-status" value={draft.status} onChange={e => updateDraft('status', e.target.value)}><option>Bozza</option><option>Inviato</option><option>Accettato</option><option>Rifiutato</option></select></div></div>
-                <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-category">Settore impiantistico</label><select id="q-category" value={draft.category} onChange={e => updateDraft('category', e.target.value)}>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></div><div className="field"><label htmlFor="q-payment">Termini di pagamento</label><textarea id="q-payment" rows={2} value={draft.payment} onChange={e => updateDraft('payment', e.target.value)} placeholder="70% a conferma lavoro\n30% a completamento" /></div></div>
+                <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-category">Settore impiantistico</label><select id="q-category" value={draft.category} onChange={e => changeDraftCategory(e.target.value)}>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></div><div className="field"><label htmlFor="q-payment">Termini di pagamento</label><textarea id="q-payment" rows={2} value={draft.payment} onChange={e => updateDraft('payment', e.target.value)} placeholder="70% a conferma lavoro\n30% a completamento" /></div></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">02</span><div><h2>Dati del cliente</h2><p>Le informazioni saranno conservate nella rubrica</p></div></div>
                 <div className="field"><label htmlFor="q-client">Nome / ragione sociale *</label><input id="q-client" list="client-suggestions" autoComplete="off" value={draft.client} onChange={e => { const value = e.target.value; updateDraft('client', value); const match = db.clients.find(c => escapeName(c.name) === escapeName(value)); if (match) setDraft(prev => ({ ...prev, client: value, address: match.address || '', tax: match.tax || '', place: match.place || '' })); }} placeholder="Es. Mario Rossi" /><datalist id="client-suggestions">{db.clients.map(c => <option value={c.name} key={c.name} />)}</datalist></div>
@@ -679,7 +905,7 @@ export default function App() {
                 <div className="field"><label htmlFor="q-subtitle">Modello, quantità o specifica (facoltativo)</label><input id="q-subtitle" value={draft.subtitle} onChange={e => updateDraft('subtitle', e.target.value)} placeholder="Es. climatizzatore mono split Hisense Console 18000 BTU A++" /></div>
                 <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><textarea id="q-intro" rows={4} maxLength={4000} value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue…" /></div>
                 <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate · tieni premuta una descrizione per trascinarla</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
-                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => item.cat === draft.category); return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><span className="description-bullet">{index + 1}</span><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist>{options.length > 0 && <select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">Inserisci dal catalogo…</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select>}</div>{line.amount !== undefined && <div className="import-editor-line-price"><label>Prezzo €</label><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></div>}<button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div>
+                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => item.cat === draft.category); return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><span className="description-bullet">{index + 1}</span><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist>{options.length > 0 && <select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">Inserisci dal catalogo…</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select>}</div><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Costo interno €</label><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma costi interni inseriti</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
                 <div className="field closing-field"><label htmlFor="q-closing">Altre condizioni / note finali</label><textarea id="q-closing" rows={3} value={draft.closing} onChange={e => updateDraft('closing', e.target.value)} placeholder="Es. escluso opere murarie, tracce e ripristini…" /></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">04</span><div><h2>Riepilogo economico</h2><p>Un solo imponibile complessivo, IVA configurabile</p></div></div>
@@ -688,7 +914,7 @@ export default function App() {
               </section>
               <div className="editor-bottom-actions"><button className="button button-secondary" onClick={() => window.print()}><Printer size={17} /> Stampa / Salva PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva preventivo</button></div>
             </div>
-            <aside className="preview-panel"><div className="preview-panel-top"><div><span className="preview-live-dot" /><strong>Anteprima documento</strong></div><button className="icon-button" onClick={() => window.print()} title="Stampa o esporta PDF" aria-label="Stampa"><Printer size={17} /></button></div><div className="preview-paper-wrap"><QuoteDocument draft={draft} settings={db.settings} /></div><div className="preview-hint"><CircleHelp size={16} /><span>L’anteprima rispecchia la stampa. Le voci importate possono includere prezzi riconosciuti dal documento.</span></div></aside>
+            <aside className="preview-panel"><div className="preview-panel-top"><div><span className="preview-live-dot" /><strong>Anteprima documento</strong></div><button className="icon-button" onClick={() => window.print()} title="Stampa o esporta PDF" aria-label="Stampa"><Printer size={17} /></button></div><div className="preview-paper-wrap"><QuoteDocument draft={draft} settings={db.settings} /></div><div className="preview-hint"><CircleHelp size={16} /><span>L’anteprima rispecchia la stampa. I costi per voce sono riservati all’editor e non vengono stampati nel preventivo.</span></div></aside>
           </div>
         </>}
 
@@ -713,7 +939,7 @@ export default function App() {
 
         {view === 'settings' && <>
           <div className="page-heading"><div><div className="eyebrow">PERSONALIZZAZIONE</div><h1>Impostazioni</h1><p>Gestisci intestazione aziendale, IVA predefinita e copie di sicurezza.</p></div></div>
-          <SettingsManager settings={db.settings} save={saveSettings} exportBackup={exportBackup} importBackup={importBackup} syncState={syncState} syncMessage={syncMessage} retrySync={retrySync} />
+          <SettingsManager settings={db.settings} save={saveSettings} exportBackup={exportBackup} importBackup={importBackup} syncState={syncState} syncMessage={syncMessage} retrySync={retrySync} /><TrashAndTemplates db={db} onRestore={restoreTrashItem} onDeleteForever={permanentlyDeleteTrashItem} onSaveTemplate={saveCategoryTemplate} />
         </>}
       </main>
       <footer className="app-footer"><span>© {new Date().getFullYear()} Chiaradia Impianti</span><span>Preventivi Pro <i>·</i> React + Supabase</span></footer>
@@ -761,11 +987,66 @@ function SettingsManager({ settings, save, exportBackup, importBackup, syncState
     <div className="settings-form-footer"><button className="button button-primary" type="submit"><Check size={17} /> Salva impostazioni</button></div></form>
   </section><aside className="settings-side-stack"><section className="surface settings-side-card"><span className="side-illustration"><Cloud size={23} /></span><h2>Backup e sincronizzazione</h2><p>Il cloud salva preventivi, rubrica, catalogo e impostazioni. Puoi anche esportare una copia indipendente.</p><div className={`sync-status-block ${syncState === 'error' ? 'is-error' : syncState === 'synced' ? 'is-good' : ''}`}><span className="sync-dot" /><div><strong>{syncState === 'synced' ? 'Collegato' : syncState === 'error' ? 'Da verificare' : 'In aggiornamento'}</strong><small>{syncMessage || 'Stato della sincronizzazione'}</small></div></div><button className="button button-secondary button-wide" onClick={retrySync}><RefreshCw size={16} /> Sincronizza adesso</button></section><section className="surface settings-side-card"><span className="side-illustration side-illustration-gold"><Download size={22} /></span><h2>Backup manuale</h2><p>Scarica tutti i dati in formato JSON o ripristina un backup precedente.</p><button className="button button-secondary button-wide" onClick={exportBackup}><Download size={16} /> Esporta backup</button><BackupInput onImport={importBackup} /></section></aside></div>;
 }
+function TrashAndTemplates({ db, onRestore, onDeleteForever, onSaveTemplate }) {
+  const [category, setCategory] = useState(CATEGORIES[0]);
+  const [templateText, setTemplateText] = useState('');
+  const [unlocked, setUnlocked] = useState(false);
+  const currentTemplate = db.settings?.categoryTemplates?.[category] || null;
+  const trash = Array.isArray(db.trash) ? [...db.trash].sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''))) : [];
+  const suggestions = useMemo(() => {
+    const counts = new Map();
+    let order = 0;
+    for (const quote of db.quotes || []) {
+      if (quote.category !== category) continue;
+      for (const line of quote.lines || []) {
+        const desc = String(line.desc || '').trim().replace(/\s+/g, ' ');
+        if (!desc) continue;
+        const key = desc.toLocaleLowerCase('it-IT');
+        const found = counts.get(key);
+        if (found) found.count += 1;
+        else counts.set(key, { desc, count: 1, order: order++ });
+      }
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count || a.order - b.order).slice(0, 30);
+  }, [db.quotes, category]);
+  useEffect(() => {
+    setTemplateText(currentTemplate?.lines?.join('\n') || suggestions.slice(0, 10).map(item => item.desc).join('\n'));
+    setUnlocked(!currentTemplate?.confirmed);
+  }, [category, currentTemplate?.confirmed, JSON.stringify(currentTemplate?.lines || []), JSON.stringify(suggestions.map(item => item.desc))]);
+  const applySuggestions = () => setTemplateText(suggestions.slice(0, 10).map(item => item.desc).join('\n'));
+  const saveTemplate = () => {
+    const lines = [...new Set(templateText.split(/\r?\n/).map(line => line.trim()).filter(Boolean))];
+    if (!lines.length) { window.alert('Inserisci almeno una voce nel modello.'); return; }
+    if (!window.confirm(`Confermi il modello predefinito per “${category}”? Dopo la conferma non cambierà automaticamente con i nuovi preventivi; per modificarlo dovrai sbloccarlo manualmente.`)) return;
+    onSaveTemplate(category, { confirmed: true, confirmedAt: new Date().toISOString(), lines });
+    setUnlocked(false);
+  };
+  const typeLabel = (entry) => entry.type === 'quote' ? 'Preventivo' : entry.type === 'client' ? 'Cliente' : 'Voce catalogo';
+  return <div className="trash-template-layout">
+    <section className="surface form-card">
+      <div className="form-card-heading"><span className="settings-heading-icon"><Trash2 size={19} /></span><div><h2>Cestino</h2><p>Gli elementi eliminati vengono conservati qui finché non li ripristini o li elimini definitivamente.</p></div></div>
+      <div className="trash-count-row"><strong>{trash.length}</strong><span>{trash.length === 1 ? 'elemento eliminato' : 'elementi eliminati'}</span></div>
+      {trash.length === 0 ? <div className="empty-state compact-empty"><Trash2 size={24}/><strong>Il cestino è vuoto</strong><p>Preventivi, clienti e voci di catalogo che elimini compariranno qui.</p></div> : <div className="trash-list">{trash.map(entry => <div className="trash-item" key={entry.id}><div className="trash-item-copy"><strong>{entry.label}</strong><span>{typeLabel(entry)} · {entry.deletedAt ? new Date(entry.deletedAt).toLocaleString('it-IT') : 'data non disponibile'}</span></div><div className="trash-item-actions"><button type="button" className="button button-secondary button-small" onClick={() => onRestore(entry)}><RefreshCw size={14}/> Ripristina</button><button type="button" className="icon-button danger-icon" title="Elimina definitivamente" aria-label={`Elimina definitivamente ${entry.label}`} onClick={() => onDeleteForever(entry)}><Trash2 size={16}/></button></div></div>)}</div>}
+    </section>
+    <section className="surface form-card">
+      <div className="form-card-heading"><span className="settings-heading-icon"><BookOpen size={19} /></span><div><h2>Modelli predefiniti per categoria</h2><p>Le voci vengono suggerite dai preventivi salvati, ordinate per frequenza. Dopo la tua conferma il modello non viene modificato automaticamente.</p></div></div>
+      <div className="field"><label htmlFor="template-category">Categoria del modello</label><select id="template-category" value={category} onChange={event => setCategory(event.target.value)}>{CATEGORIES.map(item => <option key={item}>{item}</option>)}</select></div>
+      {currentTemplate?.confirmed ? <div className="message message-info"><strong>Modello confermato e bloccato</strong><p>Ultima conferma: {currentTemplate.confirmedAt ? new Date(currentTemplate.confirmedAt).toLocaleString('it-IT') : 'data non disponibile'}. I nuovi preventivi di questa categoria useranno queste voci.</p></div> : <div className="message message-info"><strong>Modello non ancora confermato</strong><p>Controlla le voci suggerite e conferma solo quando il modello rappresenta la tua struttura abituale.</p></div>}
+      <div className="template-suggestion-heading"><strong>Voci ricorrenti rilevate</strong><span>{suggestions.length} voci</span></div>
+      {suggestions.length ? <ul className="template-suggestions">{suggestions.slice(0, 12).map(item => <li key={item.desc}><span>{item.desc}</span><small>{item.count} {item.count === 1 ? 'utilizzo' : 'utilizzi'}</small></li>)}</ul> : <p className="muted-note">Non ci sono ancora preventivi salvati con descrizioni in questa categoria. Puoi comunque creare un modello manualmente.</p>}
+      <div className="template-editor-toolbar"><label htmlFor="template-lines">Voci del modello (una per riga)</label>{!unlocked && <button type="button" className="button button-secondary button-small" onClick={() => { if (window.confirm('Sbloccare la modifica manuale del modello predefinito? Dovrai confermarlo di nuovo per renderlo attivo.')) setUnlocked(true); }}><Pencil size={14}/> Sblocca modifica</button>}</div>
+      <textarea id="template-lines" className="template-lines-editor" rows={9} value={templateText} readOnly={!unlocked} onChange={event => setTemplateText(event.target.value)} placeholder="Una descrizione di lavorazione per riga…" />
+      <div className="template-actions"><button type="button" className="button button-secondary" disabled={!unlocked || !suggestions.length} onClick={applySuggestions}>Usa voci più frequenti</button><button type="button" className="button button-primary" disabled={!unlocked} onClick={saveTemplate}><ShieldCheck size={16}/> Conferma modello predefinito</button></div>
+      <p className="muted-note">Il modello viene salvato nelle impostazioni del workspace esistente. Il blocco è una protezione dell’interfaccia: non è un sistema di autorizzazioni separato per ruoli o utenti.</p>
+    </section>
+  </div>;
+}
+
 function ImportQuoteModal({ initial, onClose, onSave }) {
-  const [form, setForm] = useState(() => ({ ...initial, lines: initial.lines.map(l => ({ ...l })) , address:initial.address || '', tax:initial.tax || '', place:'', title:'Preventivo per fornitura e posa in opera', subtitle:'', intro:'', closing:'', payment:initial.payment || '70% a conferma lavoro\n30% a completamento', vatRate:initial.vatRate ?? 10 }));
+  const [form, setForm] = useState(() => ({ ...initial, lines: initial.lines.map(l => ({ ...l })), address: initial.address || '', tax: initial.tax || '', place: initial.place || '', title: initial.title || 'Preventivo per fornitura e posa in opera', subtitle: initial.subtitle || '', intro: initial.intro || '', closing: initial.closing || '', payment: initial.payment || '70% a conferma lavoro\n30% a completamento', vatRate: initial.vatRate ?? 10 }));
   const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const setLine = (index, value) => setForm(prev => ({ ...prev, lines: prev.lines.map((line, i) => i === index ? { ...line, desc: value } : line) }));
-  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-price"><span>Prezzo (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Località / nota anagrafica</label><input value={form.place} onChange={e=>set('place',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Modello / specifiche</label><textarea rows={2} value={form.subtitle} onChange={e=>set('subtitle',e.target.value)} /></div><div className="field"><label>Testo introduttivo</label><textarea rows={3} value={form.intro} onChange={e=>set('intro',e.target.value)} /></div><div className="field"><label>Termini di pagamento</label><textarea rows={2} value={form.payment} onChange={e=>set('payment',e.target.value)} /></div><div className="field"><label>Altre condizioni / note finali</label><textarea rows={2} value={form.closing} onChange={e=>set('closing',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-price"><span>Costo interno (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
 }
 function ClientEditModal({ client, onClose, onSave }) {
   const [form, setForm] = useState({ name:client.name || '', address:client.address || '', tax:client.tax || '', place:client.place || '' });
