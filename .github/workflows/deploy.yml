@@ -16,64 +16,77 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pin the runner image instead of following ubuntu-latest migrations.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
+          package-manager-cache: false
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Install dependencies (with network retries)
         timeout-minutes: 15
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          installed=false
           for attempt in 1 2 3; do
             echo "Installazione dipendenze, tentativo ${attempt}/3"
             if npm install --no-audit --no-fund --prefer-online --fetch-retries=5 --fetch-timeout=120000; then
+              installed=true
               break
             fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Errore: impossibile installare le dipendenze npm dopo 3 tentativi."
-              exit 1
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
             fi
-            sleep 10
           done
+          if [ "$installed" != "true" ]; then
+            echo "ERRORE: impossibile installare le dipendenze npm dopo 3 tentativi."
+            exit 1
+          fi
           npm ls --depth=0
+          npm ls tesseract.js --depth=0
 
-      - name: Run tests
+      - name: Run automated tests
         run: npm test
 
       - name: Compile React application with Vite
         run: npm run build
 
-      - name: Verify compiled files
+      - name: Verify compiled website
+        shell: bash
         run: |
+          set -euo pipefail
           test -s dist/index.html
           test -d dist/assets
           find dist/assets -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -size +0c | grep -q .
           if grep -q 'src/main.jsx' dist/index.html; then
-            echo "Errore: React non è stato compilato"
+            echo "ERRORE: nell'HTML pubblicato è rimasto il riferimento sorgente a src/main.jsx."
             exit 1
           fi
+          echo "Verifica build completata: dist contiene HTML e asset compilati."
 
       - name: Upload compiled website
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Publish website
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
