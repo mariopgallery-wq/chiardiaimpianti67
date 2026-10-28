@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS = {
 };
 
 export function defaultDb() {
-  return { quotes: [], items: [], clients: [], settings: { ...DEFAULT_SETTINGS } };
+  return { quotes: [], items: [], clients: [], trash: [], settings: { ...DEFAULT_SETTINGS, categoryTemplates: {} } };
 }
 
 export function todayISO() {
@@ -32,7 +32,8 @@ export function todayISO() {
 
 export function normalizeDb(value) {
   const d = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-  const settings = { ...DEFAULT_SETTINGS, ...(d.settings && typeof d.settings === 'object' && !Array.isArray(d.settings) ? d.settings : {}) };
+  const settings = { ...DEFAULT_SETTINGS, categoryTemplates: {}, ...(d.settings && typeof d.settings === 'object' && !Array.isArray(d.settings) ? d.settings : {}) };
+  if (!settings.categoryTemplates || typeof settings.categoryTemplates !== 'object' || Array.isArray(settings.categoryTemplates)) settings.categoryTemplates = {};
   const quotes = Array.isArray(d.quotes) ? d.quotes.filter(q => q && typeof q === 'object' && !Array.isArray(q)).map((q, index) => {
     const net = Math.max(0, Number(q.net) || 0);
     const vatRate = Math.min(100, Math.max(0, Number(q.vatRate ?? settings.defaultVat) || 0));
@@ -63,7 +64,8 @@ export function normalizeDb(value) {
     ...client, name: String(client.name || ''), address: String(client.address || ''), tax: String(client.tax || ''), place: String(client.place || ''),
   })).filter(client => client.name.trim()) : [];
   const defaultVat = Math.min(100, Math.max(0, Number(settings.defaultVat) || 0));
-  return { quotes, items, clients, settings: { ...settings, defaultVat } };
+  const trash = Array.isArray(d.trash) ? d.trash.filter(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && ['quote', 'client', 'catalog'].includes(entry.type) && entry.data && typeof entry.data === 'object').map((entry, index) => ({ ...entry, id: String(entry.id || `trash-${index}`), type: entry.type, label: String(entry.label || entry.data.number || entry.data.name || entry.data.desc || 'Elemento eliminato'), deletedAt: String(entry.deletedAt || '') })) : [];
+  return { quotes, items, clients, trash, settings: { ...settings, defaultVat } };
 }
 
 export function quoteNumber(quotes = []) {
