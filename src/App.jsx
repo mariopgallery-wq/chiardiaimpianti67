@@ -7,10 +7,32 @@ import {
   ShieldCheck, Trash2, UserRound, Users, Wrench, X, Zap
 } from 'lucide-react';
 import { supabase } from './lib/supabase.js';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
+import mammoth from 'mammoth/mammoth.browser';
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 import { CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal, money, formatDate, todayISO, quoteNumber, newDraft, escapeName } from './lib/domain.js';
+import { parseQuoteText } from './lib/importQuote.js';
 
 const LOGO_URL = './logo-chiaradia.png';
+
+async function extractDocumentText(file) {
+  const ext = file.name.toLowerCase().split('.').pop();
+  if (ext === 'pdf') {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) { const page = await pdf.getPage(i); const content = await page.getTextContent(); let line = ''; let previousY = null; const pageLines = []; for (const item of content.items) { if (!('str' in item)) continue; const y = item.transform?.[5]; if (previousY !== null && y !== previousY) { pageLines.push(line); line = ''; } line += `${line ? ' ' : ''}${item.str}`; previousY = y; } if (line) pageLines.push(line); pages.push(pageLines.join('\n')); }
+    const text = pages.join('\n'); if (!text.trim()) throw new Error('Il PDF non contiene testo selezionabile. Sembra una scansione: serve OCR o un PDF con testo.'); return text;
+  }
+  if (ext === 'docx') { const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() }); if (!result.value.trim()) throw new Error('Il documento Word non contiene testo leggibile.'); return result.value; }
+  if (ext === 'doc') {
+    const buffer = await file.arrayBuffer(); const bytes = new Uint8Array(buffer); const binary = new TextDecoder('windows-1252').decode(bytes); const utf16 = new TextDecoder('utf-16le').decode(bytes); const printable = (s) => s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '\n').replace(/[ ]{2,}/g, ' ').split('\n').map(x => x.trim()).filter(x => x.length > 3 && /[a-zà-ÿ]{3}/i.test(x)).join('\n'); const extracted = [printable(utf16), printable(binary)].sort((a,b) => b.length-a.length)[0]; if (extracted.length < 30) throw new Error('Questo DOC binario non è stato letto in modo affidabile. Aprilo in Word e salvalo come DOCX, quindi importalo di nuovo.'); return extracted;
+  }
+  if (ext === 'txt') return await file.text();
+  throw new Error('Formato non supportato. Usa PDF, DOC, DOCX oppure TXT.');
+}
 
 function withTimeout(promise, ms = 12000, message = 'La richiesta è scaduta. Controlla la connessione e la configurazione Supabase.') {
   let timer;
@@ -186,7 +208,7 @@ function QuoteDocument({ draft, settings }) {
       <div className="quote-title-text">{draft.title || 'Preventivo per fornitura e posa in opera'}</div>
       {draft.subtitle && <div className="quote-subtitle-text">{draft.subtitle}</div>}
       {draft.intro && <p className="quote-intro">{draft.intro}</p>}
-      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => <li key={line.id}>{line.desc}</li>)}</ul>}
+      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => <li key={line.id}><span>{line.desc}</span>{line.amount !== null && line.amount !== undefined && line.amount !== '' && <strong className="imported-line-amount">{money(line.amount)}</strong>}</li>)}</ul>}
       {draft.closing && <p className="quote-closing">{draft.closing}</p>}
     </section>
     <footer className="quote-doc-footer">
@@ -216,12 +238,18 @@ export default function App() {
   const [catalogSearch, setCatalogSearch] = useState('');
   const [catalogFilter, setCatalogFilter] = useState('Tutti');
   const [clientSearch, setClientSearch] = useState('');
+  const [quoteImport, setQuoteImport] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [editingClient, setEditingClient] = useState(null);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [userMenu, setUserMenu] = useState(false);
   const cloudTimer = useRef(null);
   const toastTimer = useRef(null);
   const savingRef = useRef(false);
   const syncPendingRef = useRef(false);
+  const lineDragTimer = useRef(null);
+  const lineDragRef = useRef(null);
+  const [draggingLineId, setDraggingLineId] = useState(null);
   const latestDbRef = useRef(db);
   latestDbRef.current = db;
 
@@ -357,6 +385,49 @@ export default function App() {
   };
   const updateDraft = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
   const updateLine = (id, value) => setDraft(previous => ({ ...previous, lines: previous.lines.map(line => line.id === id ? { ...line, desc: value } : line) }));
+  const finishLineDrag = () => {
+    clearTimeout(lineDragTimer.current);
+    lineDragTimer.current = null;
+    lineDragRef.current = null;
+    setDraggingLineId(null);
+  };
+  const startLineDrag = (event, id) => {
+    clearTimeout(lineDragTimer.current);
+    lineDragRef.current = { id, active: false };
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    lineDragTimer.current = setTimeout(() => {
+      if (!lineDragRef.current || lineDragRef.current.id !== id) return;
+      lineDragRef.current.active = true;
+      setDraggingLineId(id);
+      try { target.setPointerCapture?.(pointerId); } catch {}
+    }, 450);
+  };
+  const moveLineDrag = (event) => {
+    const drag = lineDragRef.current;
+    if (!drag?.active || !draft) return;
+    event.preventDefault();
+    const rows = [...document.querySelectorAll('.description-line')];
+    const targetRow = rows.find(row => {
+      const rect = row.getBoundingClientRect();
+      return event.clientY >= rect.top && event.clientY <= rect.bottom;
+    });
+    const targetId = targetRow?.getAttribute('data-line-id');
+    if (!targetId || targetId === drag.id) return;
+    const rect = targetRow.getBoundingClientRect();
+    const insertAfter = event.clientY > rect.top + rect.height / 2;
+    setDraft(previous => {
+      const lines = [...previous.lines];
+      const from = lines.findIndex(line => line.id === drag.id);
+      const to = lines.findIndex(line => line.id === targetId);
+      if (from < 0 || to < 0 || from === to) return previous;
+      const [moved] = lines.splice(from, 1);
+      let destination = to + (insertAfter ? 1 : 0);
+      if (from < destination) destination -= 1;
+      lines.splice(destination, 0, moved);
+      return { ...previous, lines };
+    });
+  };
   const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '' }] }));
   const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '' }] }));
 
@@ -373,7 +444,30 @@ export default function App() {
     updateDb(previous => {
       const quotes = [...previous.quotes];
       const index = quotes.findIndex(q => q.id && q.id === quote.id);
-      const saved = { ...quote };
+      const existing = index >= 0 ? quotes[index] : null;
+      const cleanSnapshot = (item) => {
+        const { revisions, changeLog, ...snapshot } = item;
+        return JSON.parse(JSON.stringify(snapshot));
+      };
+      const changedFields = existing ? [
+        ['number', 'Numero'], ['date', 'Data'], ['status', 'Stato'], ['category', 'Settore'], ['client', 'Cliente'],
+        ['address', 'Indirizzo'], ['tax', 'Codice fiscale / P. IVA'], ['place', 'Località'], ['title', 'Titolo'],
+        ['subtitle', 'Specifiche'], ['intro', 'Testo introduttivo'], ['lines', 'Descrizioni lavori'],
+        ['closing', 'Note finali'], ['net', 'Imponibile'], ['vatRate', 'Aliquota IVA'], ['payment', 'Pagamento'],
+      ].filter(([key]) => JSON.stringify(existing[key] ?? null) !== JSON.stringify(quote[key] ?? null)).map(([, label]) => label) : ['Creazione preventivo'];
+      const revisions = existing ? [...(Array.isArray(existing.revisions) ? existing.revisions : []), {
+        id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        savedAt: existing.updated || existing.date || now,
+        note: changedFields.length ? `Modifiche: ${changedFields.join(', ')}` : 'Salvataggio senza variazioni rilevate',
+        snapshot: cleanSnapshot(existing),
+      }].slice(-100) : [];
+      const changeLog = [...(existing?.changeLog || []), {
+        id: `chg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        at: now,
+        action: existing ? 'Modifica salvata' : 'Preventivo creato',
+        details: changedFields.length ? changedFields.join(', ') : 'Nessuna variazione rilevata',
+      }].slice(-200);
+      const saved = { ...quote, revisions, changeLog };
       if (index >= 0) quotes[index] = saved; else quotes.unshift(saved);
       const clients = [...previous.clients];
       const clientIndex = clients.findIndex(c => escapeName(c.name) === escapeName(saved.client));
@@ -416,6 +510,47 @@ export default function App() {
     const blob = new Blob([JSON.stringify({ ...db, version: 2, exportedAt: new Date().toISOString() }, null, 2)], { type: 'application/json' });
     const href = URL.createObjectURL(blob); const link = document.createElement('a');
     link.href = href; link.download = `preventivi-pro-backup-${todayISO()}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(href), 1000);
+  };
+  const importQuoteFile = async (file) => {
+    if (!file) return;
+    setImportBusy(true);
+    try { const rawText = await extractDocumentText(file); setQuoteImport(parseQuoteText(rawText, file.name, db)); }
+    catch (error) { notify(error?.message || 'Impossibile leggere il documento.'); }
+    finally { setImportBusy(false); }
+  };
+  const saveImportedQuote = (parsed) => {
+    if (!parsed.client.trim()) { notify('Inserisci il nome del cliente prima di importare.'); return; }
+    const id = `q-import-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+    const clientMatch = db.clients.find(c => escapeName(c.name) === escapeName(parsed.client));
+    const existingSameQuote = db.quotes.some(q => String(q.number).trim().toLowerCase() === parsed.number.trim().toLowerCase() && escapeName(q.client) === escapeName(parsed.client));
+    if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
+    const net = Math.max(0, Number(parsed.total) || 0);
+    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', title: parsed.title || 'Preventivo per fornitura e posa in opera', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), ...(l.amount !== null && l.amount !== undefined ? { amount: Number(l.amount) } : {}) })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
+    if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate' }];
+    const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
+    updateDb(previous => {
+      const clients = [...previous.clients]; const ci = clients.findIndex(c => escapeName(c.name) === escapeName(quote.client));
+      const nextClient = { ...(ci >= 0 ? clients[ci] : {}), name: quote.client, address: quote.address, tax: quote.tax, place: quote.place };
+      if (ci >= 0) clients[ci] = nextClient; else clients.unshift(nextClient);
+      const items = [...previous.items]; for (const line of quote.lines) if (!items.some(item => item.cat === quote.category && escapeName(item.desc) === escapeName(line.desc))) items.unshift({ id: `i-imp-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, cat: quote.category, desc: line.desc });
+      return { ...previous, quotes: [quote, ...previous.quotes], clients, items };
+    });
+    setQuoteImport(null); setView('history'); notify('Preventivo importato e aggiunto all’archivio senza sostituire i dati esistenti.');
+  };
+  const saveClient = (client, previousName) => {
+    if (!client.name.trim()) { notify('Il nome del cliente è obbligatorio.'); return; }
+    if (db.clients.some(c => escapeName(c.name) === escapeName(client.name) && escapeName(c.name) !== escapeName(previousName))) { notify('Esiste già un cliente con questo nome.'); return; }
+    updateDb(previous => {
+      const clients = [...previous.clients]; const oldIndex = clients.findIndex(c => escapeName(c.name) === escapeName(previousName));
+      if (oldIndex >= 0) clients[oldIndex] = { ...clients[oldIndex], ...client, name: client.name.trim() }; else clients.unshift({ ...client, name: client.name.trim() });
+      const quotes = previous.quotes.map(q => escapeName(q.client) === escapeName(previousName) ? { ...q, client: client.name.trim(), address: client.address, tax: client.tax, place: client.place } : q);
+      return { ...previous, clients, quotes };
+    }); setEditingClient(null); notify('Dati cliente aggiornati.');
+  };
+  const deleteClient = (client) => {
+    const linked = db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length;
+    if (!window.confirm(`Eliminare il cliente “${client.name}” dalla rubrica?${linked ? ` I ${linked} preventivi collegati resteranno nell’archivio con il nome salvato.` : ''}`)) return;
+    updateDb(previous => ({ ...previous, clients: previous.clients.filter(c => escapeName(c.name) !== escapeName(client.name)) })); notify('Cliente eliminato dalla rubrica. I preventivi non sono stati eliminati.');
   };
   const importBackup = (file) => {
     if (!file) return;
@@ -527,6 +662,7 @@ export default function App() {
 
         {view === 'editor' && draft && <>
           <div className="page-heading editor-page-heading"><div><div className="eyebrow">DOCUMENTO COMMERCIALE</div><h1>{draft.id ? 'Modifica preventivo' : 'Crea un preventivo'}</h1><p>Compila i dati: l’anteprima segue le modifiche e non mostra prezzi per singola voce.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={() => setPage('history')}><ArrowLeft size={16} /> Torna all’archivio</button><button className="button button-secondary" onClick={() => window.print()}><Printer size={16} /> Stampa / PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva</button></div></div>
+          {draft.id && (() => { const savedQuote = db.quotes.find(q => q.id === draft.id); const revisions = [...(savedQuote?.revisions || [])].reverse(); const changes = [...(savedQuote?.changeLog || [])].reverse(); return <section className="surface form-card revision-history-card"><div className="form-card-heading"><span className="form-step">↺</span><div><h2>Cronologia e ripristino</h2><p>Ogni salvataggio conserva la versione precedente e registra i campi modificati. Le ultime 100 versioni e 200 eventi sono conservati nel workspace.</p></div></div>{changes.length > 0 && <div className="revision-change-list"><h3>Modifiche registrate</h3>{changes.slice(0, 12).map(event => <div className="revision-change-row" key={event.id}><span><strong>{event.action}</strong><small>{event.details}</small></span><time>{new Date(event.at).toLocaleString('it-IT')}</time></div>)}</div>}{revisions.length > 0 ? <div className="revision-list"><h3>Versioni precedenti</h3>{revisions.map((revision, idx) => <div className="revision-row" key={revision.id || idx}><span><strong>{new Date(revision.savedAt).toLocaleString('it-IT')}</strong><small>{revision.note || 'Versione salvata'}</small></span><button type="button" className="button button-secondary button-small" onClick={() => { if (!revision.snapshot) { notify('Questa versione non contiene una copia ripristinabile.'); return; } if (!window.confirm('Caricare questa versione nell’editor? Dopo il controllo premi Salva per registrare il ripristino.')) return; setDraft({ ...newDraft(db), ...revision.snapshot, id: savedQuote.id, revisions: savedQuote.revisions || [], changeLog: savedQuote.changeLog || [], lines: (revision.snapshot.lines || []).map((line, i) => ({ ...line, id: line.id || `restore-${Date.now()}-${i}`, desc: String(line.desc || '') })) }); notify('Versione caricata nell’editor. Premi Salva per confermare il ripristino.'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Ripristina</button></div>)}</div> : <p className="revision-empty">Non ci sono ancora versioni precedenti. La cronologia si popola dal primo salvataggio successivo a una modifica.</p>}</section>; })()}
           <div className="editor-layout">
             <div className="edit-panel">
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">01</span><div><h2>Dati del documento</h2><p>Numero, settore, data e condizioni</p></div></div>
@@ -538,12 +674,12 @@ export default function App() {
                 <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-address">Indirizzo / descrizione cliente</label><input id="q-address" value={draft.address} onChange={e => updateDraft('address', e.target.value)} placeholder="Via, numero civico" /></div><div className="field"><label htmlFor="q-tax">Codice fiscale / P. IVA</label><input id="q-tax" value={draft.tax} onChange={e => updateDraft('tax', e.target.value)} placeholder="Codice fiscale o partita IVA" /></div></div>
                 <div className="field"><label htmlFor="q-place">Località / nota anagrafica</label><input id="q-place" value={draft.place} onChange={e => updateDraft('place', e.target.value)} placeholder="CAP, città o riferimento" /></div>
               </section>
-              <section className="surface form-card"><div className="form-card-heading"><span className="form-step">03</span><div><h2>Descrizione dei lavori</h2><p>Inserisci le attività incluse nel preventivo, senza prezzi per riga</p></div></div>
+              <section className="surface form-card"><div className="form-card-heading"><span className="form-step">03</span><div><h2>Descrizione dei lavori</h2><p>Inserisci le attività incluse nel preventivo; i prezzi importati sono facoltativi</p></div></div>
                 <div className="field"><label htmlFor="q-title">Titolo della fornitura / del lavoro</label><textarea id="q-title" rows={2} value={draft.title} onChange={e => updateDraft('title', e.target.value)} placeholder="Preventivo per fornitura e posa in opera di…" /></div>
                 <div className="field"><label htmlFor="q-subtitle">Modello, quantità o specifica (facoltativo)</label><input id="q-subtitle" value={draft.subtitle} onChange={e => updateDraft('subtitle', e.target.value)} placeholder="Es. climatizzatore mono split Hisense Console 18000 BTU A++" /></div>
-                <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><input id="q-intro" value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue:" /></div>
-                <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
-                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => item.cat === draft.category); return <div className="description-line" key={line.id}><span className="description-bullet">{index + 1}</span><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist>{options.length > 0 && <select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">Inserisci dal catalogo…</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select>}</div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div>
+                <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><textarea id="q-intro" rows={4} maxLength={4000} value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue…" /></div>
+                <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate · tieni premuta una descrizione per trascinarla</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
+                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => item.cat === draft.category); return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><span className="description-bullet">{index + 1}</span><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist>{options.length > 0 && <select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">Inserisci dal catalogo…</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select>}</div>{line.amount !== undefined && <div className="import-editor-line-price"><label>Prezzo €</label><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></div>}<button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div>
                 <div className="field closing-field"><label htmlFor="q-closing">Altre condizioni / note finali</label><textarea id="q-closing" rows={3} value={draft.closing} onChange={e => updateDraft('closing', e.target.value)} placeholder="Es. escluso opere murarie, tracce e ripristini…" /></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">04</span><div><h2>Riepilogo economico</h2><p>Un solo imponibile complessivo, IVA configurabile</p></div></div>
@@ -552,12 +688,12 @@ export default function App() {
               </section>
               <div className="editor-bottom-actions"><button className="button button-secondary" onClick={() => window.print()}><Printer size={17} /> Stampa / Salva PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva preventivo</button></div>
             </div>
-            <aside className="preview-panel"><div className="preview-panel-top"><div><span className="preview-live-dot" /><strong>Anteprima documento</strong></div><button className="icon-button" onClick={() => window.print()} title="Stampa o esporta PDF" aria-label="Stampa"><Printer size={17} /></button></div><div className="preview-paper-wrap"><QuoteDocument draft={draft} settings={db.settings} /></div><div className="preview-hint"><CircleHelp size={16} /><span>L’anteprima rispecchia la stampa. Le singole attività non riportano importi, come nel modello.</span></div></aside>
+            <aside className="preview-panel"><div className="preview-panel-top"><div><span className="preview-live-dot" /><strong>Anteprima documento</strong></div><button className="icon-button" onClick={() => window.print()} title="Stampa o esporta PDF" aria-label="Stampa"><Printer size={17} /></button></div><div className="preview-paper-wrap"><QuoteDocument draft={draft} settings={db.settings} /></div><div className="preview-hint"><CircleHelp size={16} /><span>L’anteprima rispecchia la stampa. Le voci importate possono includere prezzi riconosciuti dal documento.</span></div></aside>
           </div>
         </>}
 
         {view === 'history' && <>
-          <div className="page-heading"><div><div className="eyebrow">ARCHIVIO DOCUMENTI</div><h1>Archivio preventivi</h1><p>Ritrova, modifica, duplica o stampa i documenti salvati.</p></div><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div>
+          <div className="page-heading"><div><div className="eyebrow">ARCHIVIO DOCUMENTI</div><h1>Archivio preventivi</h1><p>Ritrova, modifica, duplica o stampa i documenti salvati.</p></div><div className="heading-actions"><label className="button button-secondary import-quote-label"><FilePlus2 size={17} /> {importBusy ? 'Lettura documento…' : 'Importa PDF / Word'}<input type="file" accept=".pdf,.doc,.docx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" disabled={importBusy} onChange={e => { importQuoteFile(e.target.files?.[0]); e.target.value = ''; }} /></label><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div></div>
           <section className="surface table-surface"><div className="table-toolbar"><div className="table-count"><strong>{historyQuotes.length}</strong> <span>{historyQuotes.length === 1 ? 'preventivo' : 'preventivi'}</span></div><div className="search-field"><Search size={17} /><input value={historySearch} onChange={e => setHistorySearch(e.target.value)} placeholder="Cerca per numero, cliente, settore…" aria-label="Cerca preventivi" /><Filter size={15} className="search-filter-icon" /></div></div>
             {historyQuotes.length === 0 ? <EmptyState icon={FileText} title={db.quotes.length ? 'Nessun risultato' : 'Ancora nessun preventivo'} text={db.quotes.length ? 'Prova a modificare la ricerca.' : 'I preventivi creati e salvati compariranno in questo archivio.'} action={db.quotes.length ? undefined : 'Crea un preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Documento</th><th>Cliente</th><th>Settore</th><th>Stato</th><th className="align-right">Totale</th><th className="align-right">Azioni</th></tr></thead><tbody>{historyQuotes.map(q => <tr key={q.id}><td><button className="table-primary-text" onClick={() => editQuote(q)}>{q.number}</button><span className="table-secondary-text">{formatDate(q.date)}</span></td><td><strong className="table-client">{q.client}</strong></td><td><span className="category-pill">{q.category}</span></td><td><span className={`status-pill status-${String(q.status || 'bozza').toLowerCase()}`}>{q.status || 'Bozza'}</span></td><td className="align-right total-cell">{money(q.total)}</td><td><div className="table-actions"><button className="icon-button" title="Apri" aria-label="Apri" onClick={() => editQuote(q)}><Pencil size={16} /></button><button className="icon-button" title="Duplica" aria-label="Duplica" onClick={() => duplicateQuote(q)}><Copy size={16} /></button><button className="icon-button danger-icon" title="Elimina" aria-label="Elimina" onClick={() => deleteQuote(q)}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>}
           </section>
@@ -566,7 +702,7 @@ export default function App() {
         {view === 'clients' && <>
           <div className="page-heading"><div><div className="eyebrow">ANAGRAFICA</div><h1>Clienti</h1><p>La rubrica si aggiorna quando salvi un preventivo.</p></div><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div>
           <section className="surface table-surface"><div className="table-toolbar"><div className="table-count"><strong>{clientItems.length}</strong> <span>{clientItems.length === 1 ? 'cliente' : 'clienti'}</span></div><div className="search-field"><Search size={17} /><input value={clientSearch} onChange={e => setClientSearch(e.target.value)} placeholder="Cerca cliente o indirizzo…" aria-label="Cerca cliente" /></div></div>
-            {clientItems.length === 0 ? <EmptyState icon={Users} title={db.clients.length ? 'Nessun cliente trovato' : 'La rubrica è vuota'} text={db.clients.length ? 'Prova a cambiare il testo della ricerca.' : 'Salva un preventivo con i dati del cliente per aggiungerlo automaticamente.'} action={db.clients.length ? undefined : 'Crea preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Cliente</th><th>Indirizzo</th><th>Codice fiscale / P. IVA</th><th>Preventivi</th><th /></tr></thead><tbody>{clientItems.map(client => <tr key={client.name}><td><div className="client-name-cell"><span className="avatar avatar-small"><UserRound size={15} /></span><strong>{client.name}</strong></div></td><td>{client.address || client.place || '—'}</td><td>{client.tax || '—'}</td><td><span className="category-pill">{db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length} documenti</span></td><td><button className="button button-secondary button-small" onClick={() => { const d = newDraft(db); d.client = client.name; d.address = client.address || ''; d.tax = client.tax || ''; d.place = client.place || ''; setDraft(d); setView('editor'); }}>Crea preventivo</button></td></tr>)}</tbody></table></div>}
+            {clientItems.length === 0 ? <EmptyState icon={Users} title={db.clients.length ? 'Nessun cliente trovato' : 'La rubrica è vuota'} text={db.clients.length ? 'Prova a cambiare il testo della ricerca.' : 'Salva un preventivo con i dati del cliente per aggiungerlo automaticamente.'} action={db.clients.length ? undefined : 'Crea preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Cliente</th><th>Indirizzo</th><th>Codice fiscale / P. IVA</th><th>Preventivi</th><th /></tr></thead><tbody>{clientItems.map(client => <tr key={client.name}><td><div className="client-name-cell"><span className="avatar avatar-small"><UserRound size={15} /></span><strong>{client.name}</strong></div></td><td>{client.address || client.place || '—'}</td><td>{client.tax || '—'}</td><td><span className="category-pill">{db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length} documenti</span></td><td><div className="table-actions"><button className="button button-secondary button-small" onClick={() => setEditingClient({ ...client, originalName: client.name })}><Pencil size={14} /> Modifica</button><button className="icon-button danger-icon" title="Elimina cliente" aria-label="Elimina cliente" onClick={() => deleteClient(client)}><Trash2 size={16} /></button><button className="button button-secondary button-small" onClick={() => { const d = newDraft(db); d.client = client.name; d.address = client.address || ''; d.tax = client.tax || ''; d.place = client.place || ''; setDraft(d); setView('editor'); }}>Crea preventivo</button></div></td></tr>)}</tbody></table></div>}
           </section>
         </>}
 
@@ -582,6 +718,8 @@ export default function App() {
       </main>
       <footer className="app-footer"><span>© {new Date().getFullYear()} Chiaradia Impianti</span><span>Preventivi Pro <i>·</i> React + Supabase</span></footer>
     </div>
+    {quoteImport && <ImportQuoteModal initial={quoteImport} onClose={() => setQuoteImport(null)} onSave={saveImportedQuote} />}
+    {editingClient && <ClientEditModal client={editingClient} onClose={() => setEditingClient(null)} onSave={(client) => saveClient(client, editingClient.originalName)} />}
     <nav className="mobile-bottom-nav" aria-label="Navigazione rapida"><button className={view === 'home' ? 'active' : ''} onClick={() => setPage('home')}><Home size={19} /><span>Home</span></button><button className={view === 'history' ? 'active' : ''} onClick={() => setPage('history')}><FileText size={19} /><span>Archivio</span></button><button className="mobile-create" onClick={createQuote}><Plus size={24} /><span>Nuovo</span></button><button className={view === 'clients' ? 'active' : ''} onClick={() => setPage('clients')}><Users size={19} /><span>Clienti</span></button><button className={view === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}><Settings size={19} /><span>Altro</span></button></nav>
     {toast && <div className="toast-notification" role="status"><CheckCircle2 size={18} /><span>{toast}</span><button className="icon-button" onClick={() => setToast('')} aria-label="Chiudi messaggio"><X size={15} /></button></div>}
   </div>;
@@ -623,6 +761,18 @@ function SettingsManager({ settings, save, exportBackup, importBackup, syncState
     <div className="settings-form-footer"><button className="button button-primary" type="submit"><Check size={17} /> Salva impostazioni</button></div></form>
   </section><aside className="settings-side-stack"><section className="surface settings-side-card"><span className="side-illustration"><Cloud size={23} /></span><h2>Backup e sincronizzazione</h2><p>Il cloud salva preventivi, rubrica, catalogo e impostazioni. Puoi anche esportare una copia indipendente.</p><div className={`sync-status-block ${syncState === 'error' ? 'is-error' : syncState === 'synced' ? 'is-good' : ''}`}><span className="sync-dot" /><div><strong>{syncState === 'synced' ? 'Collegato' : syncState === 'error' ? 'Da verificare' : 'In aggiornamento'}</strong><small>{syncMessage || 'Stato della sincronizzazione'}</small></div></div><button className="button button-secondary button-wide" onClick={retrySync}><RefreshCw size={16} /> Sincronizza adesso</button></section><section className="surface settings-side-card"><span className="side-illustration side-illustration-gold"><Download size={22} /></span><h2>Backup manuale</h2><p>Scarica tutti i dati in formato JSON o ripristina un backup precedente.</p><button className="button button-secondary button-wide" onClick={exportBackup}><Download size={16} /> Esporta backup</button><BackupInput onImport={importBackup} /></section></aside></div>;
 }
+function ImportQuoteModal({ initial, onClose, onSave }) {
+  const [form, setForm] = useState(() => ({ ...initial, lines: initial.lines.map(l => ({ ...l })) , address:initial.address || '', tax:initial.tax || '', place:'', title:'Preventivo per fornitura e posa in opera', subtitle:'', intro:'', closing:'', payment:initial.payment || '70% a conferma lavoro\n30% a completamento', vatRate:initial.vatRate ?? 10 }));
+  const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+  const setLine = (index, value) => setForm(prev => ({ ...prev, lines: prev.lines.map((line, i) => i === index ? { ...line, desc: value } : line) }));
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-price"><span>Prezzo (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
+}
+function ClientEditModal({ client, onClose, onSave }) {
+  const [form, setForm] = useState({ name:client.name || '', address:client.address || '', tax:client.tax || '', place:client.place || '' });
+  const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}><section className="surface client-edit-modal" role="dialog" aria-modal="true" aria-labelledby="client-edit-title"><div className="modal-heading"><div><h2 id="client-edit-title">Modifica dati cliente</h2><p>Le modifiche al nome vengono riportate anche nei preventivi collegati.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="field"><label>Nome / ragione sociale *</label><input value={form.name} onChange={e=>set('name',e.target.value)}/></div><div className="field"><label>Indirizzo</label><input value={form.address} onChange={e=>set('address',e.target.value)}/></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)}/></div><div className="field"><label>Località</label><input value={form.place} onChange={e=>set('place',e.target.value)}/></div><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Salva cliente</button></div></section></div>;
+}
+
 function BackupInput({ onImport }) {
   const inputRef = useRef(null);
   return <><input className="file-input-hidden" ref={inputRef} type="file" accept="application/json,.json" onChange={e => { onImport(e.target.files?.[0]); e.target.value = ''; }} /><button className="text-button import-backup-button" onClick={() => inputRef.current?.click()}>Scegli file di backup</button></>;
