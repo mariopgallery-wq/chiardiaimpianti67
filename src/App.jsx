@@ -485,14 +485,20 @@ export default function App() {
   const printQuote = () => {
     if (!draft) return;
     const previousTitle = document.title;
-    const restoreTitle = () => { document.title = previousTitle; };
+    // Attiva una modalità di stampa isolata: nell'output resta visibile soltanto
+    // il documento A4, anche se l'editor contiene cronologia e ripristini aperti.
+    document.body.classList.add('print-quote-only');
+    const restorePrintState = () => {
+      document.title = previousTitle;
+      document.body.classList.remove('print-quote-only');
+    };
     document.title = buildQuotePdfBasename(draft);
-    window.addEventListener('afterprint', restoreTitle, { once: true });
+    window.addEventListener('afterprint', restorePrintState, { once: true });
     try {
       window.print();
     } catch (error) {
-      window.removeEventListener('afterprint', restoreTitle);
-      restoreTitle();
+      window.removeEventListener('afterprint', restorePrintState);
+      restorePrintState();
       throw error;
     }
   };
