@@ -11,7 +11,8 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import mammoth from 'mammoth/mammoth.browser';
 import { createWorker } from 'tesseract.js';
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+// Usa direttamente il worker ES module: evita il fallback fake worker di PDF.js.
+pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(pdfWorkerUrl, { type: 'module' });
 
 import { CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal, money, formatDate, todayISO, quoteNumber, newDraft, escapeName } from './lib/domain.js';
 import { parseQuoteText } from './lib/importQuote.js';
@@ -629,6 +630,29 @@ export default function App() {
   };
   const updateDraft = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
   const updateLine = (id, value) => setDraft(previous => ({ ...previous, lines: previous.lines.map(line => line.id === id ? { ...line, desc: value } : line) }));
+  const reorderLineAtPoint = (drag, clientX, clientY, targetRow = document.elementFromPoint(clientX, clientY)?.closest?.('.description-line[data-line-id]')) => {
+    if (!draft) return;
+    const targetId = targetRow?.getAttribute('data-line-id');
+    if (!targetId || targetId === drag.id) return;
+    const rect = targetRow.getBoundingClientRect();
+    const insertAfter = clientY > rect.top + rect.height / 2;
+    const position = `${targetId}:${insertAfter ? 'after' : 'before'}`;
+    if (drag.lastPosition === position) return;
+    drag.lastPosition = position;
+    setDraft(previous => {
+      if (!previous) return previous;
+      const lines = [...previous.lines];
+      const from = lines.findIndex(line => line.id === drag.id);
+      if (from < 0) return previous;
+      const [moved] = lines.splice(from, 1);
+      const targetIndex = lines.findIndex(line => line.id === targetId);
+      if (targetIndex < 0) return previous;
+      const destination = targetIndex + (insertAfter ? 1 : 0);
+      if (destination === from) return previous;
+      lines.splice(destination, 0, moved);
+      return { ...previous, lines };
+    });
+  };
   const finishLineDrag = () => {
     clearTimeout(lineDragTimer.current);
     lineDragTimer.current = null;
@@ -641,42 +665,30 @@ export default function App() {
     clearTimeout(lineDragTimer.current);
     const target = event.currentTarget;
     const pointerId = event.pointerId;
-    lineDragRef.current = { id, active: false, pointerId, lastPosition: null };
-    // Cattura subito il puntatore sulla maniglia, non sulla textarea.
+    lineDragRef.current = {
+      id, active: false, pointerId, lastPosition: null,
+      lastClientX: event.clientX, lastClientY: event.clientY,
+    };
+    // Il puntatore resta agganciato al numero, mai alla casella descrizione.
     try { target.setPointerCapture?.(pointerId); } catch {}
     lineDragTimer.current = setTimeout(() => {
       const drag = lineDragRef.current;
       if (!drag || drag.id !== id || drag.pointerId !== pointerId) return;
       drag.active = true;
       setDraggingLineId(id);
+      // Applica anche l'eventuale movimento avvenuto durante la pressione iniziale.
+      reorderLineAtPoint(drag, drag.lastClientX, drag.lastClientY);
     }, 380);
   };
   const moveLineDrag = (event) => {
     const drag = lineDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId || !drag.active || !draft) return;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    drag.lastClientX = event.clientX;
+    drag.lastClientY = event.clientY;
+    if (!drag.active || !draft) return;
     event.preventDefault();
     const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.description-line[data-line-id]');
-    const targetId = targetRow?.getAttribute('data-line-id');
-    if (!targetId || targetId === drag.id) return;
-    const rect = targetRow.getBoundingClientRect();
-    const insertAfter = event.clientY > rect.top + rect.height / 2;
-    const position = `${targetId}:${insertAfter ? 'after' : 'before'}`;
-    if (drag.lastPosition === position) return;
-    drag.lastPosition = position;
-    setDraft(previous => {
-      if (!previous) return previous;
-      const lines = [...previous.lines];
-      const from = lines.findIndex(line => line.id === drag.id);
-      const to = lines.findIndex(line => line.id === targetId);
-      if (from < 0 || to < 0 || from === to) return previous;
-      const [moved] = lines.splice(from, 1);
-      let destination = to + (insertAfter ? 1 : 0);
-      if (from < destination) destination -= 1;
-      destination = Math.max(0, Math.min(lines.length, destination));
-      if (destination === from) return previous;
-      lines.splice(destination, 0, moved);
-      return { ...previous, lines };
-    });
+    reorderLineAtPoint(drag, event.clientX, event.clientY, targetRow);
   };
   const moveLineByKeyboard = (id, direction) => setDraft(previous => {
     if (!previous) return previous;
