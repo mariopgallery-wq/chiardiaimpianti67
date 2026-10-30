@@ -4,7 +4,7 @@ import {
   Building2, Check, CheckCircle2, CircleHelp, Cloud,
   CloudOff, Copy, Download, FilePlus2, FileText, Filter, Home, KeyRound, LogOut,
   Mail, MoreHorizontal, Pencil, Plus, Printer, RefreshCw, Search, Settings,
-  ShieldCheck, Trash2, UserRound, Users, Wrench, X, Zap, Eye, EyeOff
+  ShieldCheck, Trash2, UserRound, Users, Wrench, X, Zap, Eye, EyeOff, History, ChevronDown
 } from 'lucide-react';
 import { supabase } from './lib/supabase.js';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -465,6 +465,7 @@ export default function App() {
   const [syncMessage, setSyncMessage] = useState('');
   const [toast, setToast] = useState('');
   const [historySearch, setHistorySearch] = useState('');
+  const [revisionHistoryOpen, setRevisionHistoryOpen] = useState(false);
   const [catalogSearch, setCatalogSearch] = useState('');
   const [catalogFilter, setCatalogFilter] = useState('Tutti');
   const [clientSearch, setClientSearch] = useState('');
@@ -481,6 +482,10 @@ export default function App() {
   const lineDragRef = useRef(null);
   const [draggingLineId, setDraggingLineId] = useState(null);
   const latestDbRef = useRef(db);
+
+  useEffect(() => {
+    if (view !== 'editor') setRevisionHistoryOpen(false);
+  }, [view]);
 
   const printQuote = () => {
     if (!draft) return;
@@ -635,6 +640,7 @@ export default function App() {
     return [{ id: `l${Date.now()}`, desc: '', internalPrice: null, showPrice: false }];
   };
   const createQuote = () => {
+    setRevisionHistoryOpen(false);
     // La bozza resta in memoria mentre si visitano le altre sezioni.
     if (draft) {
       setView('editor');
@@ -663,6 +669,7 @@ export default function App() {
   };
   const createQuoteForCategory = (category) => {
     if (!confirmReplaceDraft('creare un preventivo per questo settore')) return;
+    setRevisionHistoryOpen(false);
     const next = newDraft(db);
     next.category = category;
     next.lines = linesForCategory(category);
@@ -670,6 +677,7 @@ export default function App() {
   };
   const createQuoteForClient = (client) => {
     if (!confirmReplaceDraft('creare un nuovo preventivo per questo cliente')) return;
+    setRevisionHistoryOpen(false);
     const next = newDraft(db);
     next.client = client.name;
     next.address = client.address || '';
@@ -686,6 +694,7 @@ export default function App() {
     return { ...previous, category, ...(hasTypedDescriptions ? {} : { lines: linesForCategory(category) }) };
   });
   const editQuote = (quote) => {
+    setRevisionHistoryOpen(false);
     if (draft?.id && draft.id === quote.id) {
       setView('editor'); setShowMobileMenu(false);
       notify('Preventivo ripreso con le modifiche ancora in corso.');
@@ -1064,7 +1073,23 @@ export default function App() {
 
         {view === 'editor' && draft && <>
           <div className="page-heading editor-page-heading"><div><div className="eyebrow">DOCUMENTO COMMERCIALE</div><h1>{draft.id ? 'Modifica preventivo' : 'Crea un preventivo'}</h1><p>Compila i dati: l’anteprima segue le modifiche e non mostra prezzi per singola voce.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={returnToArchive}><ArrowLeft size={16} /> Torna all’archivio</button><button className="button button-secondary" onClick={printQuote}><Printer size={16} /> Stampa / PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva</button></div></div>
-          {draft.id && (() => { const savedQuote = db.quotes.find(q => q.id === draft.id); const revisions = [...(savedQuote?.revisions || [])].reverse(); const changes = [...(savedQuote?.changeLog || [])].reverse(); return <section className="surface form-card revision-history-card"><div className="form-card-heading"><span className="form-step">↺</span><div><h2>Cronologia e ripristino</h2><p>Ogni salvataggio conserva la versione precedente e registra i campi modificati. Le ultime 100 versioni e 200 eventi sono conservati nel workspace.</p></div></div>{changes.length > 0 && <div className="revision-change-list"><h3>Modifiche registrate</h3>{changes.slice(0, 12).map(event => <div className="revision-change-row" key={event.id}><span><strong>{event.action}</strong><small>{event.details}</small></span><time>{new Date(event.at).toLocaleString('it-IT')}</time></div>)}</div>}{revisions.length > 0 ? <div className="revision-list"><h3>Versioni precedenti</h3>{revisions.map((revision, idx) => <div className="revision-row" key={revision.id || idx}><span><strong>{new Date(revision.savedAt).toLocaleString('it-IT')}</strong><small>{revision.note || 'Versione salvata'}</small></span><button type="button" className="button button-secondary button-small" onClick={() => { if (!revision.snapshot) { notify('Questa versione non contiene una copia ripristinabile.'); return; } if (!window.confirm('Caricare questa versione nell’editor? Dopo il controllo premi Salva per registrare il ripristino.')) return; setDraft({ ...newDraft(db), ...revision.snapshot, id: savedQuote.id, revisions: savedQuote.revisions || [], changeLog: savedQuote.changeLog || [], lines: (revision.snapshot.lines || []).map((line, i) => ({ ...line, id: line.id || `restore-${Date.now()}-${i}`, desc: String(line.desc || '') })) }); notify('Versione caricata nell’editor. Premi Salva per confermare il ripristino.'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Ripristina</button></div>)}</div> : <p className="revision-empty">Non ci sono ancora versioni precedenti. La cronologia si popola dal primo salvataggio successivo a una modifica.</p>}</section>; })()}
+          <div className="editor-revision-toolbar">
+            <button type="button" className="button button-secondary revision-toggle" aria-expanded={revisionHistoryOpen} aria-controls="revision-history-panel" onClick={() => setRevisionHistoryOpen(open => !open)}>
+              <History size={16} /> {revisionHistoryOpen ? 'Chiudi cronologia e ripristino' : 'Cronologia e ripristino'} <ChevronDown size={15} />
+            </button>
+            <span className="revision-toolbar-hint">{draft.id ? 'Apri per consultare le modifiche e ripristinare una versione precedente' : 'La cronologia sarà disponibile dopo il primo salvataggio'}</span>
+          </div>
+          {revisionHistoryOpen && (draft.id ? (() => {
+            const savedQuote = db.quotes.find(q => q.id === draft.id);
+            if (!savedQuote) return <section id="revision-history-panel" className="surface form-card revision-history-card" aria-label="Cronologia del preventivo"><p className="revision-empty">Non è stato trovato lo storico di questo preventivo.</p></section>;
+            const revisions = [...(savedQuote.revisions || [])].reverse();
+            const changes = [...(savedQuote.changeLog || [])].reverse();
+            return <section id="revision-history-panel" className="surface form-card revision-history-card" aria-label="Cronologia del preventivo">
+              <div className="form-card-heading"><span className="form-step"><History size={17} /></span><div><h2>Cronologia e ripristino</h2><p>Consulta le modifiche registrate e seleziona una versione precedente per ripristinarla nell’editor.</p></div></div>
+              {changes.length > 0 && <div className="revision-change-list"><h3>Modifiche registrate</h3>{changes.slice(0, 12).map(event => <div className="revision-change-row" key={event.id}><span><strong>{event.action}</strong><small>{event.details}</small></span><time>{new Date(event.at).toLocaleString('it-IT')}</time></div>)}</div>}
+              {revisions.length > 0 ? <div className="revision-list"><h3>Versioni precedenti</h3>{revisions.map((revision, idx) => <div className="revision-row" key={revision.id || idx}><span><strong>{new Date(revision.savedAt).toLocaleString('it-IT')}</strong><small>{revision.note || 'Versione salvata'}</small></span><button type="button" className="button button-secondary button-small" onClick={() => { if (!revision.snapshot) { notify('Questa versione non contiene una copia ripristinabile.'); return; } if (!window.confirm('Caricare questa versione nell’editor? Dopo il controllo premi Salva per registrare il ripristino.')) return; setDraft({ ...newDraft(db), ...revision.snapshot, id: savedQuote.id, revisions: savedQuote.revisions || [], changeLog: savedQuote.changeLog || [], lines: (revision.snapshot.lines || []).map((line, i) => ({ ...line, id: line.id || `restore-${Date.now()}-${i}`, desc: String(line.desc || '') })) }); setRevisionHistoryOpen(false); notify('Versione caricata nell’editor. Premi Salva per confermare il ripristino.'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Ripristina</button></div>)}</div> : <p className="revision-empty">Non ci sono ancora versioni precedenti. La cronologia si popola dal primo salvataggio successivo a una modifica.</p>}
+            </section>;
+          })() : <section id="revision-history-panel" className="surface form-card revision-history-card" aria-label="Cronologia del preventivo"><p className="revision-empty">Salva prima il preventivo. Dopo il salvataggio qui troverai le modifiche registrate e le versioni da ripristinare.</p></section>)}
           <div className="editor-layout">
             <div className="edit-panel">
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">01</span><div><h2>Dati del documento</h2><p>Numero, settore, data e condizioni</p></div></div>
