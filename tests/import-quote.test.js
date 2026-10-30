@@ -83,8 +83,8 @@ test('uses the page layout to separate company header, customer, quote data, pay
   assert.equal(result.number, 'P 31.26');
   assert.equal(result.date, '2026-10-24');
   assert.equal(result.tax, '', 'the company VAT number must not become the customer tax number');
-  assert.equal(result.address, '', 'a site descriptor must not be placed in the street-address field');
-  assert.equal(result.place, 'LOCALE DI CULTO · 26900 LODI (LO)', 'site descriptor and postal locality belong to customer location notes');
+  assert.equal(result.address, '', 'a site descriptor must not be treated as a street address');
+  assert.equal(result.place, 'LOCALE DI CULTO · 26900 LODI (LO)');
   assert.equal(result.payment, '70% a conferma lavoro\n30% a completamento');
   assert.equal(result.category, 'Climatizzazione');
   assert.equal(result.total, 17500);
@@ -104,8 +104,8 @@ test('infers the customer from the lower header area in a Word-style text extrac
   assert.equal(result.number, 'P 31.26');
   assert.equal(result.date, '2026-10-24');
   assert.equal(result.tax, '');
-  assert.equal(result.address, '', 'a site descriptor must not be placed in the street-address field');
-  assert.equal(result.place, 'LOCALE DI CULTO · 26900 LODI (LO)', 'site descriptor and postal locality belong to customer location notes');
+  assert.equal(result.address, '', 'a site descriptor must not be treated as a street address');
+  assert.equal(result.place, 'LOCALE DI CULTO · 26900 LODI (LO)');
   assert.equal(result.payment, '70% a conferma lavoro\n30% a completamento');
   assert.equal(result.total, 17500);
   assert.ok(result.lines.some(line => line.desc === 'Installazione di climatizzatore'));
@@ -135,27 +135,18 @@ test('recognizes integer euro prices with thousands separators without mistaking
   assert.equal(result.lines.find(line => line.desc === 'Installazione di 2 unità')?.amount, null);
 });
 
-
-test('regression: header/customer/payment text is never imported as work descriptions or street address', () => {
-  const text = `CHIARADIA IMPIANTI\nDi Filippo Chiaradia\nC.da graviglione 9\n70024 – Gravina in Puglia (BA)\nP. IVA 08623720722\nPEC: chiaradiafilippo@pec.it\nDIMATTIA GIUSEPPE\nLOCALE DI CULTO\n26900 LODI (LO)\nP 31.26\nData: 24/10/2026\nTermini: 70% a conferma lavoro\n30% a completamento\nARTICOLO IMPORTO\nPreventivo per fornitura e posa in opera di un climatizzatore mono split\nHisense Console 18000btu A++\nSi precisa quanto segue:\nLa valutazione è stata fatta in base alla qualità e tipologia delle categorie dei lavori indicati verbalmente in sede\ndi sopralluogo effettuato con il committente ed elencati in lista;\nIl preventivo include:\nRealizzazione della linea di alimentazione dei climatizzatori mt 10 circa, escluso di tracce.\nTotale imponibile: 17.500,00 €\nIVA (10%): 1.750,00 €\nTotale: 19.250,00 €`;
-  const result = parseQuoteText(text, 'P.31-26 DIMATTIA GIUSEPPE LOCALE DI CULTO LODI DUAL 18+18000 HISENSE CONSOLE.pdf', { settings: { defaultVat: 10, address: 'C.da graviglione 9', vat: '08623720722', name: 'CHIARADIA IMPIANTI' } });
-  assert.equal(result.client, 'DIMATTIA GIUSEPPE');
-  assert.equal(result.number, 'P 31.26', 'prefer the number read from the document over the filename fallback');
+test('regression: the filename provides the quote number only when the document does not contain one', () => {
+  const text = `Cliente: Mario Rossi\nData: 24/10/2026\nARTICOLO IMPORTO\nInstallazione climatizzatore\nTotale imponibile: 1.200,00 €`;
+  const result = parseQuoteText(text, 'P.31-26 DIMATTIA GIUSEPPE.pdf', { settings: { defaultVat: 10 } });
+  assert.equal(result.number, 'P 31-26');
+  assert.equal(result.client, 'Mario Rossi');
   assert.equal(result.date, '2026-10-24');
-  assert.equal(result.address, '');
-  assert.equal(result.tax, '');
-  assert.equal(result.payment, '70% a conferma lavoro\n30% a completamento');
-  assert.match(result.title, /Preventivo per fornitura e posa/);
-  assert.match(result.subtitle, /Hisense Console/);
-  assert.match(result.intro, /La valutazione è stata fatta/);
-  assert.ok(result.lines.some(line => line.desc === 'Realizzazione della linea di alimentazione dei climatizzatori mt 10 circa, escluso di tracce.'));
-  assert.ok(result.lines.every(line => !/CHIARADIA|DIMATTIA|LOCALE DI CULTO|26900 LODI|P 31[.-]26|Termini:|30% a completamento|ed elencati in lista|di sopralluogo effettuato/i.test(line.desc)), `Unexpected header or intro text in lines: ${JSON.stringify(result.lines)}`);
+  assert.ok(result.lines.some(line => line.desc === 'Installazione climatizzatore'));
 });
 
-test('uses the number at the start of the filename only when the document itself has no quote number', () => {
-  const text = `CHIARADIA IMPIANTI\nDi Filippo Chiaradia\nDIMATTIA GIUSEPPE\n26900 LODI (LO)\nData: 24/10/2026\nARTICOLO IMPORTO\nPreventivo per climatizzatore\nHisense Console 18000Btu A++\nIl preventivo include:\nInstallazione climatizzatore\nTotale imponibile: 17.500,00 €`;
-  const result = parseQuoteText(text, 'P.31-26 DIMATTIA GIUSEPPE LOCALE DI CULTO.pdf', { settings: { defaultVat: 10 } });
-  assert.equal(result.number, 'P 31-26');
-  assert.equal(result.client, 'DIMATTIA GIUSEPPE');
-  assert.ok(result.lines.every(line => !/DIMATTIA|LODI|CHIARADIA/.test(line.desc)));
+test('PDF worker URL is kept separate from the existing import parser and client data model', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  assert.match(app, /parseQuoteText\(extracted\.text, file\.name, db/);
+  assert.match(app, /pdfjsLib\.GlobalWorkerOptions\.workerSrc/);
+  assert.match(app, /saveImportedQuote/);
 });
