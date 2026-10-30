@@ -8,10 +8,11 @@ import {
 } from 'lucide-react';
 import { supabase } from './lib/supabase.js';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import mammoth from 'mammoth/mammoth.browser';
 import { createWorker } from 'tesseract.js';
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+// Load a same-version worker copied to public/ by scripts/prepare-pdf-worker.mjs.
+// Resolving from BASE_URL prevents GitHub Pages from returning index.html for a bad worker path.
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(`${import.meta.env.BASE_URL}pdf.worker.min.mjs`, window.location.href).toString();
 
 import { CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal, money, formatDate, todayISO, quoteNumber, newDraft, escapeName } from './lib/domain.js';
 import { parseQuoteText } from './lib/importQuote.js';
@@ -570,9 +571,29 @@ export default function App() {
     return [{ id: `l${Date.now()}`, desc: '', internalPrice: null }];
   };
   const createQuote = () => {
+    // Una bozza resta disponibile mentre si esplorano archivio, clienti, catalogo e impostazioni.
+    // I comandi di creazione la riprendono: per abbandonarla esplicitamente si usa
+    // “Torna all’archivio” dentro l’editor.
+    if (draft) {
+      setView('editor');
+      setShowMobileMenu(false);
+      notify('Bozza ripresa: le modifiche in corso sono ancora disponibili.');
+      return;
+    }
     const next = newDraft(db);
     next.lines = linesForCategory(next.category);
     setDraft(next); setView('editor'); setShowMobileMenu(false);
+  };
+  const returnToArchive = () => {
+    // Le modifiche all'editor restano locali fino al comando Salva. Scartare la bozza
+    // non scrive sul workspace; per un preventivo esistente resta valida l'ultima versione salvata.
+    clearTimeout(lineDragTimer.current);
+    lineDragRef.current = null;
+    setDraggingLineId(null);
+    setDraft(null);
+    setView('history');
+    setShowMobileMenu(false);
+    notify('Modifiche non salvate annullate. Il preventivo salvato in archivio non è stato modificato.');
   };
   const changeDraftCategory = (category) => setDraft(previous => {
     if (!previous) return previous;
@@ -580,6 +601,15 @@ export default function App() {
     return { ...previous, category, ...(hasTypedDescriptions ? {} : { lines: linesForCategory(category) }) };
   });
   const editQuote = (quote) => {
+    if (draft?.id && draft.id === quote.id) {
+      // Se l'utente torna dall'archivio sullo stesso documento, riprende esattamente
+      // la bozza in memoria invece di sovrascriverla con i dati salvati.
+      setView('editor'); setShowMobileMenu(false); return;
+    }
+    if (draft && (draft.client || draft.lines?.some(line => String(line.desc || '').trim()))) {
+      const answer = window.confirm('Hai una bozza con modifiche non salvate. Vuoi abbandonarla e aprire il preventivo selezionato?');
+      if (!answer) return;
+    }
     setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '', internalPrice: null }] });
     setView('editor'); setShowMobileMenu(false);
   };
@@ -691,6 +721,9 @@ export default function App() {
     notify('Preventivo spostato nel cestino.');
   };
   const duplicateQuote = (quote) => {
+    if (draft && (draft.client || draft.lines?.some(line => String(line.desc || '').trim()))) {
+      if (!window.confirm('Hai una bozza in corso. Vuoi abbandonarla e aprire la copia del preventivo selezionato?')) return;
+    }
     const copy = { ...quote, id: null, number: quoteNumber(db.quotes), date: todayISO(), status: 'Bozza', lines: (quote.lines || []).map(line => ({ ...line, id: `l${Date.now()}${Math.random()}` })) };
     setDraft(copy); setView('editor'); notify('Copia pronta da modificare.');
   };
@@ -823,13 +856,17 @@ export default function App() {
 
   const menu = [
     { id: 'home', label: 'Panoramica', icon: Home },
-    { id: 'editor', label: 'Nuovo preventivo', icon: FilePlus2, action: createQuote },
+    { id: 'editor', label: draft ? 'Riprendi preventivo' : 'Nuovo preventivo', icon: FilePlus2, action: createQuote },
     { id: 'history', label: 'Archivio preventivi', icon: FileText },
     { id: 'clients', label: 'Clienti', icon: Users },
     { id: 'catalog', label: 'Catalogo lavori', icon: BookOpen },
     { id: 'settings', label: 'Impostazioni', icon: Settings },
   ];
-  const setPage = (id) => { setView(id); setShowMobileMenu(false); if (id !== 'editor') setDraft(null); };
+  const setPage = (id) => {
+    // La navigazione tra le sezioni non elimina mai una bozza. L'abbandono è esplicito
+    // e avviene soltanto tramite returnToArchive() dall'editor.
+    setView(id); setShowMobileMenu(false);
+  };
   const pageTitle = ({ home: 'Panoramica', editor: draft?.id ? 'Modifica preventivo' : 'Nuovo preventivo', history: 'Archivio preventivi', clients: 'Anagrafica clienti', catalog: 'Catalogo lavori', settings: 'Impostazioni' })[view] || 'Panoramica';
 
   return <div className="app-shell">
@@ -883,11 +920,11 @@ export default function App() {
               <div className="tip-box"><span><BadgeCheck size={17} /></span><p><strong>Un unico archivio</strong><br />Quando il cloud è collegato, i preventivi si sincronizzano con gli altri dispositivi.</p></div>
             </section>
           </div>
-          <section className="categories-section"><div className="section-heading"><div><h2>Settori di lavoro</h2><p>Seleziona un settore mentre prepari il documento.</p></div></div><div className="category-cards">{CATEGORIES.map((cat, index) => { const icons = [Zap, AirVent, Wrench, ShieldCheck, Activity, Building2]; const Icon = icons[index]; return <button key={cat} className="category-card" onClick={() => { const d = newDraft(db); d.category = cat; setDraft(d); setView('editor'); }}><span className={`category-icon category-tone-${index}`}><Icon size={19} /></span><span><strong>{cat}</strong><small>{db.items.filter(i => i.cat === cat).length} voci salvate</small></span><ArrowRight size={16} /></button>; })}</div></section>
+          <section className="categories-section"><div className="section-heading"><div><h2>Settori di lavoro</h2><p>Seleziona un settore mentre prepari il documento.</p></div></div><div className="category-cards">{CATEGORIES.map((cat, index) => { const icons = [Zap, AirVent, Wrench, ShieldCheck, Activity, Building2]; const Icon = icons[index]; return <button key={cat} className="category-card" onClick={() => { if (draft) { setView('editor'); notify('Hai già una bozza aperta: la riprendo senza perdere le modifiche.'); return; } const d = newDraft(db); d.category = cat; d.lines = linesForCategory(cat); setDraft(d); setView('editor'); }}><span className={`category-icon category-tone-${index}`}><Icon size={19} /></span><span><strong>{cat}</strong><small>{db.items.filter(i => i.cat === cat).length} voci salvate</small></span><ArrowRight size={16} /></button>; })}</div></section>
         </>}
 
         {view === 'editor' && draft && <>
-          <div className="page-heading editor-page-heading"><div><div className="eyebrow">DOCUMENTO COMMERCIALE</div><h1>{draft.id ? 'Modifica preventivo' : 'Crea un preventivo'}</h1><p>Compila i dati: l’anteprima segue le modifiche e non mostra prezzi per singola voce.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={() => setPage('history')}><ArrowLeft size={16} /> Torna all’archivio</button><button className="button button-secondary" onClick={() => window.print()}><Printer size={16} /> Stampa / PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva</button></div></div>
+          <div className="page-heading editor-page-heading"><div><div className="eyebrow">DOCUMENTO COMMERCIALE</div><h1>{draft.id ? 'Modifica preventivo' : 'Crea un preventivo'}</h1><p>Compila i dati: l’anteprima segue le modifiche e non mostra prezzi per singola voce.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={returnToArchive}><ArrowLeft size={16} /> Torna all’archivio</button><button className="button button-secondary" onClick={() => window.print()}><Printer size={16} /> Stampa / PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva</button></div></div>
           {draft.id && (() => { const savedQuote = db.quotes.find(q => q.id === draft.id); const revisions = [...(savedQuote?.revisions || [])].reverse(); const changes = [...(savedQuote?.changeLog || [])].reverse(); return <section className="surface form-card revision-history-card"><div className="form-card-heading"><span className="form-step">↺</span><div><h2>Cronologia e ripristino</h2><p>Ogni salvataggio conserva la versione precedente e registra i campi modificati. Le ultime 100 versioni e 200 eventi sono conservati nel workspace.</p></div></div>{changes.length > 0 && <div className="revision-change-list"><h3>Modifiche registrate</h3>{changes.slice(0, 12).map(event => <div className="revision-change-row" key={event.id}><span><strong>{event.action}</strong><small>{event.details}</small></span><time>{new Date(event.at).toLocaleString('it-IT')}</time></div>)}</div>}{revisions.length > 0 ? <div className="revision-list"><h3>Versioni precedenti</h3>{revisions.map((revision, idx) => <div className="revision-row" key={revision.id || idx}><span><strong>{new Date(revision.savedAt).toLocaleString('it-IT')}</strong><small>{revision.note || 'Versione salvata'}</small></span><button type="button" className="button button-secondary button-small" onClick={() => { if (!revision.snapshot) { notify('Questa versione non contiene una copia ripristinabile.'); return; } if (!window.confirm('Caricare questa versione nell’editor? Dopo il controllo premi Salva per registrare il ripristino.')) return; setDraft({ ...newDraft(db), ...revision.snapshot, id: savedQuote.id, revisions: savedQuote.revisions || [], changeLog: savedQuote.changeLog || [], lines: (revision.snapshot.lines || []).map((line, i) => ({ ...line, id: line.id || `restore-${Date.now()}-${i}`, desc: String(line.desc || '') })) }); notify('Versione caricata nell’editor. Premi Salva per confermare il ripristino.'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Ripristina</button></div>)}</div> : <p className="revision-empty">Non ci sono ancora versioni precedenti. La cronologia si popola dal primo salvataggio successivo a una modifica.</p>}</section>; })()}
           <div className="editor-layout">
             <div className="edit-panel">
@@ -904,8 +941,8 @@ export default function App() {
                 <div className="field"><label htmlFor="q-title">Titolo della fornitura / del lavoro</label><textarea id="q-title" rows={2} value={draft.title} onChange={e => updateDraft('title', e.target.value)} placeholder="Preventivo per fornitura e posa in opera di…" /></div>
                 <div className="field"><label htmlFor="q-subtitle">Modello, quantità o specifica (facoltativo)</label><input id="q-subtitle" value={draft.subtitle} onChange={e => updateDraft('subtitle', e.target.value)} placeholder="Es. climatizzatore mono split Hisense Console 18000 BTU A++" /></div>
                 <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><textarea id="q-intro" rows={4} maxLength={4000} value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue…" /></div>
-                <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate · tieni premuta una descrizione per trascinarla</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
-                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => item.cat === draft.category); return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><span className="description-bullet">{index + 1}</span><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist>{options.length > 0 && <select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">Inserisci dal catalogo…</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select>}</div><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Costo interno €</label><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma costi interni inseriti</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
+                <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate · tieni premuto il numero per trascinare la voce</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
+                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => String(item?.desc || '').trim()); return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} title="Tieni premuto per spostare questa voce" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select></div><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Costo interno €</label><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma costi interni inseriti</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
                 <div className="field closing-field"><label htmlFor="q-closing">Altre condizioni / note finali</label><textarea id="q-closing" rows={3} value={draft.closing} onChange={e => updateDraft('closing', e.target.value)} placeholder="Es. escluso opere murarie, tracce e ripristini…" /></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">04</span><div><h2>Riepilogo economico</h2><p>Un solo imponibile complessivo, IVA configurabile</p></div></div>
@@ -928,7 +965,7 @@ export default function App() {
         {view === 'clients' && <>
           <div className="page-heading"><div><div className="eyebrow">ANAGRAFICA</div><h1>Clienti</h1><p>La rubrica si aggiorna quando salvi un preventivo.</p></div><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div>
           <section className="surface table-surface"><div className="table-toolbar"><div className="table-count"><strong>{clientItems.length}</strong> <span>{clientItems.length === 1 ? 'cliente' : 'clienti'}</span></div><div className="search-field"><Search size={17} /><input value={clientSearch} onChange={e => setClientSearch(e.target.value)} placeholder="Cerca cliente o indirizzo…" aria-label="Cerca cliente" /></div></div>
-            {clientItems.length === 0 ? <EmptyState icon={Users} title={db.clients.length ? 'Nessun cliente trovato' : 'La rubrica è vuota'} text={db.clients.length ? 'Prova a cambiare il testo della ricerca.' : 'Salva un preventivo con i dati del cliente per aggiungerlo automaticamente.'} action={db.clients.length ? undefined : 'Crea preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Cliente</th><th>Indirizzo</th><th>Codice fiscale / P. IVA</th><th>Preventivi</th><th /></tr></thead><tbody>{clientItems.map(client => <tr key={client.name}><td><div className="client-name-cell"><span className="avatar avatar-small"><UserRound size={15} /></span><strong>{client.name}</strong></div></td><td>{client.address || client.place || '—'}</td><td>{client.tax || '—'}</td><td><span className="category-pill">{db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length} documenti</span></td><td><div className="table-actions"><button className="button button-secondary button-small" onClick={() => setEditingClient({ ...client, originalName: client.name })}><Pencil size={14} /> Modifica</button><button className="icon-button danger-icon" title="Elimina cliente" aria-label="Elimina cliente" onClick={() => deleteClient(client)}><Trash2 size={16} /></button><button className="button button-secondary button-small" onClick={() => { const d = newDraft(db); d.client = client.name; d.address = client.address || ''; d.tax = client.tax || ''; d.place = client.place || ''; setDraft(d); setView('editor'); }}>Crea preventivo</button></div></td></tr>)}</tbody></table></div>}
+            {clientItems.length === 0 ? <EmptyState icon={Users} title={db.clients.length ? 'Nessun cliente trovato' : 'La rubrica è vuota'} text={db.clients.length ? 'Prova a cambiare il testo della ricerca.' : 'Salva un preventivo con i dati del cliente per aggiungerlo automaticamente.'} action={db.clients.length ? undefined : 'Crea preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Cliente</th><th>Indirizzo</th><th>Codice fiscale / P. IVA</th><th>Preventivi</th><th /></tr></thead><tbody>{clientItems.map(client => <tr key={client.name}><td><div className="client-name-cell"><span className="avatar avatar-small"><UserRound size={15} /></span><strong>{client.name}</strong></div></td><td>{client.address || client.place || '—'}</td><td>{client.tax || '—'}</td><td><span className="category-pill">{db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length} documenti</span></td><td><div className="table-actions"><button className="button button-secondary button-small" onClick={() => setEditingClient({ ...client, originalName: client.name })}><Pencil size={14} /> Modifica</button><button className="icon-button danger-icon" title="Elimina cliente" aria-label="Elimina cliente" onClick={() => deleteClient(client)}><Trash2 size={16} /></button><button className="button button-secondary button-small" onClick={() => { if (draft) { setView('editor'); notify('Hai già una bozza aperta: la riprendo senza perdere le modifiche. Per crearne una nuova, torna all’archivio dall’editor.'); return; } const d = newDraft(db); d.client = client.name; d.address = client.address || ''; d.tax = client.tax || ''; d.place = client.place || ''; setDraft(d); setView('editor'); }}>Crea preventivo</button></div></td></tr>)}</tbody></table></div>}
           </section>
         </>}
 
