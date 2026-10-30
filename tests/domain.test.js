@@ -104,15 +104,16 @@ test('normalization ignores malformed trash entries but keeps valid workspace da
 });
 
 
-test('every quote line shows a catalog selector with all entries of the signed-in workspace', async () => {
+test('every quote line shows catalog suggestions from previous quotes in the selected category', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const start = app.indexOf('const editorCatalogItems = useMemo');
   const end = app.indexOf('const clientItems', start);
   assert.ok(start >= 0 && end > start);
   const catalog = app.slice(start, end);
-  assert.match(catalog, /Array\.isArray\(db\.items\)/);
-  assert.match(catalog, /typeof item\.desc === 'string'/);
-  assert.doesNotMatch(catalog, /draft\.category|catalogFilter/);
+  assert.match(catalog, /Array\.isArray\(db\.quotes\)/);
+  assert.match(catalog, /quote\.category === draft\.category/);
+  assert.match(catalog, /Array\.isArray\(quote\.lines\)/);
+  assert.match(catalog, /\[db\.quotes, draft\?\.category\]/);
   const rowStart = app.indexOf('draft.lines.map((line, index)');
   const rowEnd = app.indexOf('</div><div className="internal-cost-summary"', rowStart);
   assert.ok(rowStart >= 0 && rowEnd > rowStart);
