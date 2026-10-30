@@ -250,3 +250,12 @@ test('starting a second quote or duplicate from another section asks before repl
   assert.match(app, /onClick=\{\(\) => createQuoteForCategory\(cat\)\}/);
   assert.match(app, /onClick=\{\(\) => createQuoteForClient\(client\)\}/);
 });
+
+
+test('print header shows IMPORTO only when at least one line price is enabled and valid', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  assert.match(app, /const hasVisibleLinePrice = \(draft\.lines \|\| \[\]\)\.some/);
+  assert.match(app, /line\.showPrice === true && value !== null && value !== '' && Number\.isFinite\(Number\(value\)\)/);
+  assert.match(app, /\{hasVisibleLinePrice && <span>IMPORTO<\/span>\}/);
+  assert.match(app, /hasVisibleLinePrice \? ' has-visible-amount' : ' no-visible-amount'/);
+});
