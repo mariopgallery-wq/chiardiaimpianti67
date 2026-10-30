@@ -4,12 +4,38 @@ import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
-test('PDF.js worker is imported as a Vite asset and follows the configured Pages base path', async () => {
+test('PDF.js uses the bundled ES module worker directly and follows the configured Pages base path', async () => {
   const app = await read('../src/App.jsx');
   const vite = await read('../vite.config.js');
-  assert.match(app, /import pdfWorkerUrl from ['"]pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs\?url['"]/);
-  assert.match(app, /pdfjsLib\.GlobalWorkerOptions\.workerSrc = pdfWorkerUrl/);
-  assert.match(vite, /base:\s*['"]\.\/['"]/);
+  assert.ok(app.includes("import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'"));
+  assert.ok(app.includes("pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(pdfWorkerUrl, { type: 'module' });"));
+  assert.ok(!app.includes('GlobalWorkerOptions.workerSrc = pdfWorkerUrl'));
+  assert.ok(vite.includes("base: './'") || vite.includes('base: "./"'));
+});
+
+test('line dragging remembers pointer movement during the long press and starts from the number handle', async () => {
+  const app = await read('../src/App.jsx');
+  assert.ok(app.includes('lastClientX: event.clientX, lastClientY: event.clientY,'));
+  assert.ok(app.includes('reorderLineAtPoint(drag, drag.lastClientX, drag.lastClientY);'));
+  assert.ok(app.includes('onPointerDown={e => startLineDrag(e, line.id)}'));
+});
+
+test('the customer name keeps the exact letter case entered and printed', async () => {
+  const app = await read('../src/App.jsx');
+  const css = await read('../src/styles.css');
+  assert.ok(app.includes('client: draft.client.trim()'));
+  assert.ok(app.includes("<strong>{draft.client || 'NOME CLIENTE'}</strong>"));
+  assert.ok(!css.includes('.quote-recipient>strong{font-size:12px;text-transform:uppercase}'));
+});
+
+test('printing shows only the A4 quote template and excludes editor revision history', async () => {
+  const css = await read('../src/styles.css');
+  assert.match(css, /@page\s*\{\s*size\s*:\s*A4 portrait/i);
+  assert.match(css, /\.page-editor\s*>\s*:not\(\.editor-layout\)\s*\{\s*display:\s*none\s*!important/i);
+  assert.match(css, /\.revision-history-card\s*,[\s\S]*?display:\s*none\s*!important/i);
+  assert.match(css, /\.editor-layout\s*>\s*\.edit-panel\s*\{\s*display:\s*none\s*!important/i);
+  assert.match(css, /\.editor-layout\s*>\s*\.preview-panel\s*>\s*:not\(\.preview-paper-wrap\)/);
+  assert.match(css, /#quote-document\s*\{[\s\S]*?width:\s*184mm\s*!important/i);
 });
 
 test('GitHub Pages workflow checks the Vite-emitted worker asset instead of an unrelated public file path', async () => {
