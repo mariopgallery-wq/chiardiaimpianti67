@@ -406,6 +406,9 @@ function QuoteDocument({ draft, settings }) {
         {draft.address && <div>{draft.address}</div>}
         {draft.tax && <div>{draft.tax}</div>}
         {draft.place && <div>{draft.place}</div>}
+        {draft.phone && <div>Tel.: {draft.phone}</div>}
+        {draft.email && <div>E-mail: {draft.email}</div>}
+        {draft.pec && <div>PEC: {draft.pec}</div>}
       </div>
       <div className="quote-reference">
         <strong className="quote-number">{draft.number || 'P —'}</strong>
@@ -649,6 +652,9 @@ export default function App() {
     next.address = client.address || '';
     next.tax = client.tax || '';
     next.place = client.place || '';
+    next.phone = client.phone || '';
+    next.email = client.email || '';
+    next.pec = client.pec || '';
     setDraft(next); setView('editor'); setShowMobileMenu(false);
   };
   const changeDraftCategory = (category) => setDraft(previous => {
@@ -761,7 +767,8 @@ export default function App() {
       };
       const changedFields = existing ? [
         ['number', 'Numero'], ['date', 'Data'], ['status', 'Stato'], ['category', 'Settore'], ['client', 'Cliente'],
-        ['address', 'Indirizzo'], ['tax', 'Codice fiscale / P. IVA'], ['place', 'Località'], ['title', 'Titolo'],
+        ['address', 'Indirizzo'], ['tax', 'Codice fiscale / P. IVA'], ['place', 'Località'],
+        ['phone', 'Telefono'], ['email', 'E-mail'], ['pec', 'PEC'], ['title', 'Titolo'],
         ['subtitle', 'Specifiche'], ['intro', 'Testo introduttivo'], ['lines', 'Descrizioni lavori'],
         ['closing', 'Note finali'], ['net', 'Imponibile'], ['vatRate', 'Aliquota IVA'], ['payment', 'Pagamento'],
       ].filter(([key]) => JSON.stringify(existing[key] ?? null) !== JSON.stringify(quote[key] ?? null)).map(([, label]) => label) : ['Creazione preventivo'];
@@ -781,7 +788,7 @@ export default function App() {
       if (index >= 0) quotes[index] = saved; else quotes.unshift(saved);
       const clients = [...previous.clients];
       const clientIndex = clients.findIndex(c => escapeName(c.name) === escapeName(saved.client));
-      const client = { name: saved.client, address: saved.address || '', tax: saved.tax || '', place: saved.place || '' };
+      const client = { name: saved.client, address: saved.address || '', tax: saved.tax || '', place: saved.place || '', phone: saved.phone || '', email: saved.email || '', pec: saved.pec || '' };
       if (clientIndex >= 0) clients[clientIndex] = client; else clients.unshift(client);
       const items = [...previous.items];
       for (const line of saved.lines) {
@@ -840,12 +847,12 @@ export default function App() {
     const existingSameQuote = db.quotes.some(q => String(q.number).trim().toLowerCase() === parsed.number.trim().toLowerCase() && escapeName(q.client) === escapeName(parsed.client));
     if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
     const net = Math.max(0, Number(parsed.total) || 0);
-    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', title: parsed.title || 'Preventivo per fornitura e posa in opera', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
+    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || 'Preventivo per fornitura e posa in opera', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
     if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate' }];
     const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
     updateDb(previous => {
       const clients = [...previous.clients]; const ci = clients.findIndex(c => escapeName(c.name) === escapeName(quote.client));
-      const nextClient = { ...(ci >= 0 ? clients[ci] : {}), name: quote.client, address: quote.address, tax: quote.tax, place: quote.place };
+      const nextClient = { ...(ci >= 0 ? clients[ci] : {}), name: quote.client, address: quote.address, tax: quote.tax, place: quote.place, phone: quote.phone || '', email: quote.email || '', pec: quote.pec || '' };
       if (ci >= 0) clients[ci] = nextClient; else clients.unshift(nextClient);
       const items = [...previous.items]; for (const line of quote.lines) if (!items.some(item => item.cat === quote.category && escapeName(item.desc) === escapeName(line.desc))) items.unshift({ id: `i-imp-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, cat: quote.category, desc: line.desc });
       return { ...previous, quotes: [quote, ...previous.quotes], clients, items };
@@ -858,7 +865,7 @@ export default function App() {
     updateDb(previous => {
       const clients = [...previous.clients]; const oldIndex = clients.findIndex(c => escapeName(c.name) === escapeName(previousName));
       if (oldIndex >= 0) clients[oldIndex] = { ...clients[oldIndex], ...client, name: client.name.trim() }; else clients.unshift({ ...client, name: client.name.trim() });
-      const quotes = previous.quotes.map(q => escapeName(q.client) === escapeName(previousName) ? { ...q, client: client.name.trim(), address: client.address, tax: client.tax, place: client.place } : q);
+      const quotes = previous.quotes.map(q => escapeName(q.client) === escapeName(previousName) ? { ...q, client: client.name.trim(), address: client.address, tax: client.tax, place: client.place, phone: client.phone || '', email: client.email || '', pec: client.pec || '' } : q);
       return { ...previous, clients, quotes };
     }); setEditingClient(null); notify('Dati cliente aggiornati.');
   };
@@ -924,10 +931,22 @@ export default function App() {
       .sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
   }, [db.quotes, historySearch]);
   const catalogItems = useMemo(() => db.items.filter(item => (catalogFilter === 'Tutti' || item.cat === catalogFilter) && item.desc.toLowerCase().includes(catalogSearch.toLowerCase())), [db.items, catalogFilter, catalogSearch]);
-  // Tutte le voci del catalogo dell'account corrente, senza filtro per settore.
-  const editorCatalogItems = useMemo(() => (Array.isArray(db.items) ? db.items : [])
-    .filter(item => item && typeof item.desc === 'string' && item.desc.trim()), [db.items]);
-  const clientItems = useMemo(() => db.clients.filter(client => [client.name, client.address, client.tax, client.place].some(value => String(value || '').toLowerCase().includes(clientSearch.toLowerCase()))), [db.clients, clientSearch]);
+  // Suggerisce solo descrizioni già usate in preventivi precedenti dello stesso settore.
+  const editorCatalogItems = useMemo(() => {
+    if (!draft?.category) return [];
+    const seen = new Set();
+    return (Array.isArray(db.quotes) ? db.quotes : [])
+      .filter(quote => quote && quote.category === draft.category)
+      .flatMap(quote => Array.isArray(quote.lines) ? quote.lines : [])
+      .map((line, index) => ({ id: `quote-${draft.category}-${index}`, cat: draft.category, desc: String(line?.desc || '').trim() }))
+      .filter(item => {
+        const key = item.desc.toLocaleLowerCase('it-IT');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }, [db.quotes, draft?.category]);
+  const clientItems = useMemo(() => db.clients.filter(client => [client.name, client.address, client.tax, client.place, client.phone, client.email, client.pec].some(value => String(value || '').toLowerCase().includes(clientSearch.toLowerCase()))), [db.clients, clientSearch]);
 
   if (passwordRecovery) return <PasswordRecoveryScreen onComplete={async () => { const result = await supabase.auth.getUser(); if (result.error) throw result.error; setPasswordRecovery(false); if (result.data.user) await hydrateUser(result.data.user); }} />;
   if (booting) return <div className="app-loading"><span className="spinner spinner-dark" /><strong>Avvio di Preventivi Pro</strong><p>Verifica della sessione sicura…</p></div>;
@@ -1017,9 +1036,14 @@ export default function App() {
                 <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-category">Settore impiantistico</label><select id="q-category" value={draft.category} onChange={e => changeDraftCategory(e.target.value)}>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></div><div className="field"><label htmlFor="q-payment">Termini di pagamento</label><textarea id="q-payment" rows={2} value={draft.payment} onChange={e => updateDraft('payment', e.target.value)} placeholder="70% a conferma lavoro\n30% a completamento" /></div></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">02</span><div><h2>Dati del cliente</h2><p>Le informazioni saranno conservate nella rubrica</p></div></div>
-                <div className="field"><label htmlFor="q-client">Nome / ragione sociale *</label><input id="q-client" list="client-suggestions" autoComplete="off" value={draft.client} onChange={e => { const value = e.target.value; updateDraft('client', value); const match = db.clients.find(c => escapeName(c.name) === escapeName(value)); if (match) setDraft(prev => ({ ...prev, client: value, address: match.address || '', tax: match.tax || '', place: match.place || '' })); }} placeholder="Es. Mario Rossi" /><datalist id="client-suggestions">{db.clients.map(c => <option value={c.name} key={c.name} />)}</datalist></div>
+                <div className="field"><label htmlFor="q-client">Nome / ragione sociale *</label><input id="q-client" list="client-suggestions" autoComplete="off" value={draft.client} onChange={e => { const value = e.target.value; updateDraft('client', value); const match = db.clients.find(c => escapeName(c.name) === escapeName(value)); if (match) setDraft(prev => ({ ...prev, client: value, address: match.address || '', tax: match.tax || '', place: match.place || '', phone: match.phone || '', email: match.email || '', pec: match.pec || '' })); }} placeholder="Es. Mario Rossi" /><datalist id="client-suggestions">{db.clients.map(c => <option value={c.name} key={c.name} />)}</datalist></div>
                 <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-address">Indirizzo / descrizione cliente</label><input id="q-address" value={draft.address} onChange={e => updateDraft('address', e.target.value)} placeholder="Via, numero civico" /></div><div className="field"><label htmlFor="q-tax">Codice fiscale / P. IVA</label><input id="q-tax" value={draft.tax} onChange={e => updateDraft('tax', e.target.value)} placeholder="Codice fiscale o partita IVA" /></div></div>
                 <div className="field"><label htmlFor="q-place">Località / nota anagrafica</label><input id="q-place" value={draft.place} onChange={e => updateDraft('place', e.target.value)} placeholder="CAP, città o riferimento" /></div>
+                 <div className="form-grid form-grid-three">
+                   <div className="field"><label htmlFor="q-phone">Numero di telefono (facoltativo)</label><input id="q-phone" type="tel" autoComplete="tel" value={draft.phone || ''} onChange={e => updateDraft('phone', e.target.value)} placeholder="Es. 333 1234567" /></div>
+                   <div className="field"><label htmlFor="q-email">E-mail (facoltativa)</label><input id="q-email" type="email" autoComplete="email" value={draft.email || ''} onChange={e => updateDraft('email', e.target.value)} placeholder="nome@email.it" /></div>
+                   <div className="field"><label htmlFor="q-pec">PEC (facoltativa)</label><input id="q-pec" type="email" value={draft.pec || ''} onChange={e => updateDraft('pec', e.target.value)} placeholder="nome@pec.it" /></div>
+                 </div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">03</span><div><h2>Descrizione dei lavori</h2><p>Inserisci le attività incluse nel preventivo; i prezzi importati sono facoltativi</p></div></div>
                 <div className="field"><label htmlFor="q-title">Titolo della fornitura / del lavoro</label><textarea id="q-title" rows={2} value={draft.title} onChange={e => updateDraft('title', e.target.value)} placeholder="Preventivo per fornitura e posa in opera di…" /></div>
@@ -1170,9 +1194,9 @@ function ImportQuoteModal({ initial, onClose, onSave }) {
   return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Località / nota anagrafica</label><input value={form.place} onChange={e=>set('place',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Modello / specifiche</label><textarea rows={2} value={form.subtitle} onChange={e=>set('subtitle',e.target.value)} /></div><div className="field"><label>Testo introduttivo</label><textarea rows={3} value={form.intro} onChange={e=>set('intro',e.target.value)} /></div><div className="field"><label>Termini di pagamento</label><textarea rows={2} value={form.payment} onChange={e=>set('payment',e.target.value)} /></div><div className="field"><label>Altre condizioni / note finali</label><textarea rows={2} value={form.closing} onChange={e=>set('closing',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-price"><span>Costo interno (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
 }
 function ClientEditModal({ client, onClose, onSave }) {
-  const [form, setForm] = useState({ name:client.name || '', address:client.address || '', tax:client.tax || '', place:client.place || '' });
+  const [form, setForm] = useState({ name:client.name || '', address:client.address || '', tax:client.tax || '', place:client.place || '', phone:client.phone || '', email:client.email || '', pec:client.pec || '' });
   const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
-  return <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}><section className="surface client-edit-modal" role="dialog" aria-modal="true" aria-labelledby="client-edit-title"><div className="modal-heading"><div><h2 id="client-edit-title">Modifica dati cliente</h2><p>Le modifiche al nome vengono riportate anche nei preventivi collegati.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="field"><label>Nome / ragione sociale *</label><input value={form.name} onChange={e=>set('name',e.target.value)}/></div><div className="field"><label>Indirizzo</label><input value={form.address} onChange={e=>set('address',e.target.value)}/></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)}/></div><div className="field"><label>Località</label><input value={form.place} onChange={e=>set('place',e.target.value)}/></div><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Salva cliente</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}><section className="surface client-edit-modal" role="dialog" aria-modal="true" aria-labelledby="client-edit-title"><div className="modal-heading"><div><h2 id="client-edit-title">Modifica dati cliente</h2><p>Le modifiche al nome vengono riportate anche nei preventivi collegati.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="field"><label>Nome / ragione sociale *</label><input value={form.name} onChange={e=>set('name',e.target.value)}/></div><div className="field"><label>Indirizzo</label><input value={form.address} onChange={e=>set('address',e.target.value)}/></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)}/></div><div className="field"><label>Località</label><input value={form.place} onChange={e=>set('place',e.target.value)}/></div><div className="field"><label>Numero di telefono</label><input type="tel" value={form.phone} onChange={e=>set('phone',e.target.value)}/></div><div className="field"><label>E-mail</label><input type="email" value={form.email} onChange={e=>set('email',e.target.value)}/></div><div className="field"><label>PEC</label><input type="email" value={form.pec} onChange={e=>set('pec',e.target.value)}/></div><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Salva cliente</button></div></section></div>;
 }
 
 function BackupInput({ onImport }) {
