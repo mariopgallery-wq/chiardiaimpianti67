@@ -82,8 +82,8 @@ test('GitHub Pages deploy runs only on manual request after all files are upload
 test('quote line descriptions preserve line breaks in the printed bullet list', async () => {
   const app = await read('../src/App.jsx');
   const css = await read('../src/styles.css');
-  assert.ok(app.includes('<span>{line.desc}</span>'));
-  assert.match(css, /\.quote-bullets li\s*>\s*span\s*\{[^}]*white-space:\s*pre-line/s);
+  assert.ok(app.includes('<span className="quote-bullet-marker" aria-hidden="true">•</span><span className="quote-bullet-text">{line.desc}</span>'));
+  assert.match(css, /\.quote-bullet-text\s*\{[^}]*white-space:\s*pre-line/s);
   assert.ok(app.includes("desc: String(line.desc || '').trim()"));
 });
 
