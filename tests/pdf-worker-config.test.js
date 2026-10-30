@@ -4,32 +4,35 @@ import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
-test('PDF.js uses the version-matched public worker under the Vite base path', async () => {
+test('PDF.js worker is imported as a Vite asset and follows the configured Pages base path', async () => {
   const app = await read('../src/App.jsx');
-  assert.match(app, /pdf\.worker\.min\.mjs/);
-  assert.match(app, /import\.meta\.env\.BASE_URL/);
-  assert.match(app, /pdfjsLib\.GlobalWorkerOptions\.workerSrc/);
-  assert.doesNotMatch(app, /pdf\.worker\.min\.mjs\?url/);
+  const vite = await read('../vite.config.js');
+  assert.match(app, /import pdfWorkerUrl from ['"]pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs\?url['"]/);
+  assert.match(app, /pdfjsLib\.GlobalWorkerOptions\.workerSrc = pdfWorkerUrl/);
+  assert.match(vite, /base:\s*['"]\.\/['"]/);
 });
 
-test('package lifecycle prepares the worker before Vite dev and production build', async () => {
+test('GitHub Pages workflow checks the Vite-emitted worker asset instead of an unrelated public file path', async () => {
+  const workflow = await read('../.github/workflows/deploy.yml');
+  assert.match(workflow, /npm test/);
+  assert.match(workflow, /npm run build/);
+  assert.match(workflow, /pdf\.worker\*\.mjs/);
+  assert.match(workflow, /dist\/assets/);
+  assert.doesNotMatch(workflow, /test -s dist\/pdf\.worker\.min\.mjs/);
+});
+
+test('the package exposes test and build scripts and includes PDF.js', async () => {
   const pkg = JSON.parse(await read('../package.json'));
-  assert.equal(pkg.scripts.predev, 'node scripts/prepare-pdf-worker.mjs');
-  assert.equal(pkg.scripts.prebuild, 'node scripts/prepare-pdf-worker.mjs');
+  assert.equal(pkg.scripts.test, 'node --test');
+  assert.equal(pkg.scripts.build, 'vite build');
   assert.ok(pkg.dependencies['pdfjs-dist']);
 });
 
-test('worker preparation script copies the worker from the installed PDF.js version and rejects HTML', async () => {
-  const script = await read('../scripts/prepare-pdf-worker.mjs');
-  assert.match(script, /node_modules\/pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs/);
-  assert.match(script, /public\/pdf\.worker\.min\.mjs/);
-  assert.match(script, /first === '<'/);
-  assert.match(script, /destinationStats\.size !== sourceStats\.size/);
-});
 
-test('GitHub Pages workflow fails safely when a worker is missing or contains HTML', async () => {
+test('GitHub Pages deploy runs only on manual request after all files are uploaded', async () => {
   const workflow = await read('../.github/workflows/deploy.yml');
-  assert.match(workflow, /test -s dist\/pdf\.worker\.min\.mjs/);
-  assert.match(workflow, /worker_bytes/);
-  assert.match(workflow, /worker PDF contiene HTML/);
+  assert.match(workflow, /on:\s*workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /^\s+push:/m, 'per-file commits must not start intermediate builds');
+  assert.match(workflow, /if:\s*github\.ref == ['"]refs\/heads\/main['"]/);
+  assert.match(workflow, /cancel-in-progress:\s*false/, 'a later upload must not cancel a deployment already requested');
 });
