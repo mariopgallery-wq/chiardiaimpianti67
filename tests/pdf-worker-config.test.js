@@ -38,6 +38,21 @@ test('printing shows only the A4 quote template and excludes editor revision his
   assert.match(css, /#quote-document\s*\{[\s\S]*?width:\s*184mm\s*!important/i);
 });
 
+test('PDF save suggests a filename from quote number, customer, address, category and company', async () => {
+  const app = await read('../src/App.jsx');
+  assert.ok(app.includes('function safeFilenamePart(value)'));
+  assert.ok(app.includes('function buildQuotePdfBasename(quote = {})'));
+  assert.ok(app.includes("safeFilenamePart(quote.number) || 'Preventivo'"));
+  assert.ok(app.includes('safeFilenamePart(quote.client)'));
+  assert.ok(app.includes('safeFilenamePart(quote.address)'));
+  assert.ok(app.includes('safeFilenamePart(quote.category)'));
+  assert.ok(app.includes("'Chiaradia Impianti'"));
+  assert.ok(app.includes('document.title = buildQuotePdfBasename(draft);'));
+  assert.ok(app.includes("window.addEventListener('afterprint', restoreTitle, { once: true });"));
+  assert.equal((app.match(/onClick=\{printQuote\}/g) || []).length, 3);
+  assert.doesNotMatch(app, /onClick=\{\(\) => window\.print\(\)\}/);
+});
+
 test('GitHub Pages workflow checks the Vite-emitted worker asset instead of an unrelated public file path', async () => {
   const workflow = await read('../.github/workflows/deploy.yml');
   assert.match(workflow, /npm test/);
