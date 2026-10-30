@@ -359,6 +359,29 @@ function EmptyState({ icon: Icon = FileText, title, text, action, onAction }) {
   return <div className="empty-state"><span className="empty-icon"><Icon size={24} /></span><strong>{title}</strong><p>{text}</p>{action && <button className="button button-primary" onClick={onAction}><Plus size={16} /> {action}</button>}</div>;
 }
 
+function safeFilenamePart(value) {
+  return String(value ?? '')
+    .normalize('NFC')
+    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '');
+}
+
+// Il browser usa il titolo del documento come nome iniziale quando si salva in PDF.
+// Il numero viene mantenuto esattamente come scritto nell'editor (es. P01.26 o P01.27).
+function buildQuotePdfBasename(quote = {}) {
+  const number = safeFilenamePart(quote.number) || 'Preventivo';
+  const parts = [
+    number,
+    safeFilenamePart(quote.client),
+    safeFilenamePart(quote.address),
+    safeFilenamePart(quote.category),
+    'Chiaradia Impianti',
+  ].filter(Boolean);
+  return parts.join(' - ') || 'Preventivo';
+}
+
 function QuoteDocument({ draft, settings }) {
   const sums = calcTotal(draft);
   const logoSrc = settings.logoData || LOGO_URL;
@@ -438,6 +461,21 @@ export default function App() {
   const lineDragRef = useRef(null);
   const [draggingLineId, setDraggingLineId] = useState(null);
   const latestDbRef = useRef(db);
+
+  const printQuote = () => {
+    if (!draft) return;
+    const previousTitle = document.title;
+    const restoreTitle = () => { document.title = previousTitle; };
+    document.title = buildQuotePdfBasename(draft);
+    window.addEventListener('afterprint', restoreTitle, { once: true });
+    try {
+      window.print();
+    } catch (error) {
+      window.removeEventListener('afterprint', restoreTitle);
+      restoreTitle();
+      throw error;
+    }
+  };
   latestDbRef.current = db;
 
   const notify = useCallback((message) => {
@@ -970,7 +1008,7 @@ export default function App() {
         </>}
 
         {view === 'editor' && draft && <>
-          <div className="page-heading editor-page-heading"><div><div className="eyebrow">DOCUMENTO COMMERCIALE</div><h1>{draft.id ? 'Modifica preventivo' : 'Crea un preventivo'}</h1><p>Compila i dati: l’anteprima segue le modifiche e non mostra prezzi per singola voce.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={returnToArchive}><ArrowLeft size={16} /> Torna all’archivio</button><button className="button button-secondary" onClick={() => window.print()}><Printer size={16} /> Stampa / PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva</button></div></div>
+          <div className="page-heading editor-page-heading"><div><div className="eyebrow">DOCUMENTO COMMERCIALE</div><h1>{draft.id ? 'Modifica preventivo' : 'Crea un preventivo'}</h1><p>Compila i dati: l’anteprima segue le modifiche e non mostra prezzi per singola voce.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={returnToArchive}><ArrowLeft size={16} /> Torna all’archivio</button><button className="button button-secondary" onClick={printQuote}><Printer size={16} /> Stampa / PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva</button></div></div>
           {draft.id && (() => { const savedQuote = db.quotes.find(q => q.id === draft.id); const revisions = [...(savedQuote?.revisions || [])].reverse(); const changes = [...(savedQuote?.changeLog || [])].reverse(); return <section className="surface form-card revision-history-card"><div className="form-card-heading"><span className="form-step">↺</span><div><h2>Cronologia e ripristino</h2><p>Ogni salvataggio conserva la versione precedente e registra i campi modificati. Le ultime 100 versioni e 200 eventi sono conservati nel workspace.</p></div></div>{changes.length > 0 && <div className="revision-change-list"><h3>Modifiche registrate</h3>{changes.slice(0, 12).map(event => <div className="revision-change-row" key={event.id}><span><strong>{event.action}</strong><small>{event.details}</small></span><time>{new Date(event.at).toLocaleString('it-IT')}</time></div>)}</div>}{revisions.length > 0 ? <div className="revision-list"><h3>Versioni precedenti</h3>{revisions.map((revision, idx) => <div className="revision-row" key={revision.id || idx}><span><strong>{new Date(revision.savedAt).toLocaleString('it-IT')}</strong><small>{revision.note || 'Versione salvata'}</small></span><button type="button" className="button button-secondary button-small" onClick={() => { if (!revision.snapshot) { notify('Questa versione non contiene una copia ripristinabile.'); return; } if (!window.confirm('Caricare questa versione nell’editor? Dopo il controllo premi Salva per registrare il ripristino.')) return; setDraft({ ...newDraft(db), ...revision.snapshot, id: savedQuote.id, revisions: savedQuote.revisions || [], changeLog: savedQuote.changeLog || [], lines: (revision.snapshot.lines || []).map((line, i) => ({ ...line, id: line.id || `restore-${Date.now()}-${i}`, desc: String(line.desc || '') })) }); notify('Versione caricata nell’editor. Premi Salva per confermare il ripristino.'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Ripristina</button></div>)}</div> : <p className="revision-empty">Non ci sono ancora versioni precedenti. La cronologia si popola dal primo salvataggio successivo a una modifica.</p>}</section>; })()}
           <div className="editor-layout">
             <div className="edit-panel">
@@ -995,9 +1033,9 @@ export default function App() {
                 <div className="financial-fields"><div className="field"><label htmlFor="q-net">Totale imponibile (€)</label><div className="money-input"><span>€</span><input id="q-net" type="number" min="0" step="0.01" inputMode="decimal" value={draft.net} onChange={e => updateDraft('net', e.target.value)} placeholder="0,00" /></div></div><div className="field"><label htmlFor="q-vat">Aliquota IVA</label><div className="vat-input"><select aria-label="Aliquota IVA predefinita" value={['0','4','5','10','22'].includes(String(draft.vatRate)) ? String(draft.vatRate) : 'custom'} onChange={e => { if (e.target.value !== 'custom') updateDraft('vatRate', Number(e.target.value)); }}><option value="0">0%</option><option value="4">4%</option><option value="5">5%</option><option value="10">10%</option><option value="22">22%</option><option value="custom">Personalizzata</option></select><input type="number" min="0" max="100" step="0.1" aria-label="Aliquota IVA personalizzata percentuale" value={draft.vatRate} onChange={e => updateDraft('vatRate', e.target.value)} /></div></div></div>
                 <div className="calculated-total"><div><span>Imponibile</span><strong>{money(calcTotal(draft).net)}</strong></div><div><span>IVA {Number(draft.vatRate) || 0}%</span><strong>{money(calcTotal(draft).vat)}</strong></div><div className="calculated-grand"><span>Totale documento</span><strong>{money(calcTotal(draft).total)}</strong></div></div>
               </section>
-              <div className="editor-bottom-actions"><button className="button button-secondary" onClick={() => window.print()}><Printer size={17} /> Stampa / Salva PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva preventivo</button></div>
+              <div className="editor-bottom-actions"><button className="button button-secondary" onClick={printQuote}><Printer size={17} /> Stampa / Salva PDF</button><button className="button button-primary" onClick={saveQuote}><Check size={17} /> Salva preventivo</button></div>
             </div>
-            <aside className="preview-panel"><div className="preview-panel-top"><div><span className="preview-live-dot" /><strong>Anteprima documento</strong></div><button className="icon-button" onClick={() => window.print()} title="Stampa o esporta PDF" aria-label="Stampa"><Printer size={17} /></button></div><div className="preview-paper-wrap"><QuoteDocument draft={draft} settings={db.settings} /></div><div className="preview-hint"><CircleHelp size={16} /><span>L’anteprima rispecchia la stampa. I costi per voce sono riservati all’editor e non vengono stampati nel preventivo.</span></div></aside>
+            <aside className="preview-panel"><div className="preview-panel-top"><div><span className="preview-live-dot" /><strong>Anteprima documento</strong></div><button className="icon-button" onClick={printQuote} title="Stampa o esporta PDF" aria-label="Stampa"><Printer size={17} /></button></div><div className="preview-paper-wrap"><QuoteDocument draft={draft} settings={db.settings} /></div><div className="preview-hint"><CircleHelp size={16} /><span>L’anteprima rispecchia la stampa. I costi per voce sono riservati all’editor e non vengono stampati nel preventivo.</span></div></aside>
           </div>
         </>}
 
