@@ -104,16 +104,18 @@ test('normalization ignores malformed trash entries but keeps valid workspace da
 });
 
 
-test('every quote line shows catalog suggestions from previous quotes in the selected category', async () => {
+test('every quote line shows catalog and saved-quote suggestions only from the selected category', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const start = app.indexOf('const editorCatalogItems = useMemo');
   const end = app.indexOf('const clientItems', start);
   assert.ok(start >= 0 && end > start);
   const catalog = app.slice(start, end);
+  assert.match(catalog, /Array\.isArray\(db\.items\)/);
+  assert.match(catalog, /item\.cat === category/);
   assert.match(catalog, /Array\.isArray\(db\.quotes\)/);
-  assert.match(catalog, /quote\.category === draft\.category/);
+  assert.match(catalog, /quote\.category === category/);
   assert.match(catalog, /Array\.isArray\(quote\.lines\)/);
-  assert.match(catalog, /\[db\.quotes, draft\?\.category\]/);
+  assert.match(catalog, /\[db\.items, db\.quotes, draft\?\.category\]/);
   const rowStart = app.indexOf('draft.lines.map((line, index)');
   const rowEnd = app.indexOf('</div><div className="internal-cost-summary"', rowStart);
   assert.ok(rowStart >= 0 && rowEnd > rowStart);
@@ -124,6 +126,18 @@ test('every quote line shows catalog suggestions from previous quotes in the sel
   assert.match(row, /Catalogo vuoto/);
   assert.match(row, /options\.map\(item => <option/);
   assert.doesNotMatch(row, /\{options\.length > 0 && <select/);
+});
+
+test('quote editor exposes three distinct optional customer contact fields', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const start = app.indexOf('<div className="client-contact-heading">');
+  const end = app.indexOf('</section>', start);
+  assert.ok(start >= 0 && end > start);
+  const contacts = app.slice(start, end);
+  assert.match(contacts, /id="q-phone" type="tel"/);
+  assert.match(contacts, /id="q-email" type="email"/);
+  assert.match(contacts, /id="q-pec" type="email"/);
+  assert.match(contacts, /facoltativo/);
 });
 
 test('each non-empty activity has a visible bullet in the quote preview', async () => {
