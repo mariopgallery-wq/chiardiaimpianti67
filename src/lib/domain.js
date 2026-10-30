@@ -45,6 +45,7 @@ export function normalizeDb(value) {
       category: CATEGORIES.includes(q.category) ? q.category : CATEGORIES[0],
       status: String(q.status || 'Bozza'), client: String(q.client || ''),
       address: String(q.address || ''), tax: String(q.tax || ''), place: String(q.place || ''),
+      phone: String(q.phone || ''), email: String(q.email || ''), pec: String(q.pec || ''),
       title: String(q.title ?? 'Preventivo per fornitura e posa in opera di'),
       subtitle: String(q.subtitle || ''), intro: String(q.intro || ''), closing: String(q.closing || ''),
       payment: String(q.payment ?? settings.payment ?? DEFAULT_SETTINGS.payment),
@@ -62,6 +63,7 @@ export function normalizeDb(value) {
   })) : [];
   const clients = Array.isArray(d.clients) ? d.clients.filter(client => client && typeof client === 'object' && !Array.isArray(client)).map(client => ({
     ...client, name: String(client.name || ''), address: String(client.address || ''), tax: String(client.tax || ''), place: String(client.place || ''),
+    phone: String(client.phone || ''), email: String(client.email || ''), pec: String(client.pec || ''),
   })).filter(client => client.name.trim()) : [];
   const defaultVat = Math.min(100, Math.max(0, Number(settings.defaultVat) || 0));
   const trash = Array.isArray(d.trash) ? d.trash.filter(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && ['quote', 'client', 'catalog'].includes(entry.type) && entry.data && typeof entry.data === 'object').map((entry, index) => ({ ...entry, id: String(entry.id || `trash-${index}`), type: entry.type, label: String(entry.label || entry.data.number || entry.data.name || entry.data.desc || 'Elemento eliminato'), deletedAt: String(entry.deletedAt || '') })) : [];
@@ -80,7 +82,7 @@ export function newDraft(db = defaultDb()) {
   return {
     id: null, number: quoteNumber(db?.quotes), date: todayISO(), category: CATEGORIES[0],
     status: 'Bozza', payment: settings.payment || DEFAULT_SETTINGS.payment,
-    client: '', address: '', tax: '', place: '',
+    client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
     title: 'Preventivo per fornitura e posa in opera di',
     subtitle: '', intro: 'Si precisa quanto segue:',
     lines: [{ id: `l${Date.now()}`, desc: '' }],
