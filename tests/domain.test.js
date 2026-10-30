@@ -86,6 +86,24 @@ test('normalization preserves editor-only line costs without adding them to the 
   assert.equal(calcTotal(db.quotes[0]).total, 110);
 });
 
+test('normalization preserves per-activity price visibility and keeps the quote total independent', () => {
+  const db = normalizeDb({
+    quotes: [{
+      number: 'P 08.26', client: 'Mario Rossi', net: 100, vatRate: 10,
+      lines: [
+        { id: 'line-visible', desc: 'Installazione quadro', internalPrice: 23.5, showPrice: true },
+        { id: 'line-hidden', desc: 'Verifica impianto', internalPrice: 12, showPrice: false },
+        { id: 'line-legacy', desc: 'Sostituzione presa', internalPrice: 8 },
+      ],
+    }],
+  });
+  const [visible, hidden, legacy] = db.quotes[0].lines;
+  assert.equal(visible.showPrice, true);
+  assert.equal(hidden.showPrice, false);
+  assert.equal(legacy.showPrice, false, 'old records without the setting default to hidden');
+  assert.equal(calcTotal(db.quotes[0]).total, 110, 'per-line prices do not change the quote grand total');
+});
+
 test('normalization preserves deleted items and confirmed category templates without schema changes', () => {
   const entry = { id: 'trash-1', type: 'quote', label: 'P 01.26 · Cliente', deletedAt: '2026-10-28T10:00:00.000Z', data: { id: 'q1', number: 'P 01.26', client: 'Cliente' } };
   const template = { confirmed: true, confirmedAt: '2026-10-28T10:00:00.000Z', lines: ['Installazione quadro', 'Verifica impianto'] };
@@ -143,12 +161,26 @@ test('quote editor exposes three distinct optional customer contact fields', asy
 test('each non-empty activity has an explicit bullet marker in preview and print, including flex list rows', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
-  assert.match(app, /<ul className="quote-bullets">\{draft\.lines\.filter\(line => line\.desc\?\.trim\(\)\)\.map\(line => <li/);
+  assert.match(app, /<ul className="quote-bullets">[\s\S]*?className="quote-bullet-marker"/);
   assert.match(app, /className="quote-bullet-marker"[^>]*>•<\/span>/);
   assert.match(css, /\.quote-bullets li\s*\{[^}]*display:flex/s);
   assert.match(css, /\.quote-bullet-marker\s*\{[^}]*display:\s*inline-block/s);
   const printStyles = css.slice(css.lastIndexOf('@media print'));
   assert.match(printStyles, /\.quote-bullet-marker/);
+});
+
+test('editor provides a per-activity eye control that toggles printed price visibility', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const rowStart = app.indexOf('<div className="description-lines">');
+  const rowEnd = app.indexOf('</div><div className="internal-cost-summary">', rowStart);
+  assert.ok(rowStart >= 0 && rowEnd > rowStart);
+  const row = app.slice(rowStart, rowEnd);
+  assert.match(row, /aria-pressed=\{line\.showPrice === true\}/);
+  assert.match(row, /item\.showPrice!==true/);
+  assert.match(row, /<Eye size=\{16\}\/>/);
+  assert.match(row, /<EyeOff size=\{16\}\/>/);
+  assert.match(row, /Prezzo €/);
+  assert.match(row, /showPrice:item\.showPrice!==true/);
 });
 
 test('the numbered activity handle supports deliberate long-press drag and keyboard reordering', async () => {
