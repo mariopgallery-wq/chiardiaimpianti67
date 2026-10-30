@@ -118,14 +118,16 @@ test('keeps intentionally repeated description rows instead of deduplicating the
 });
 
 
-test('internal line costs are not rendered in the customer document component', async () => {
+test('customer document renders a line price only when its per-line visibility switch is enabled', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const start = app.indexOf('function QuoteDocument');
   const end = app.indexOf('export default function App', start);
   assert.ok(start >= 0 && end > start, 'QuoteDocument component should exist');
   const documentComponent = app.slice(start, end);
   assert.match(documentComponent, /line\.desc/);
-  assert.doesNotMatch(documentComponent, /internalPrice|line\.amount|money\(line/);
+  assert.match(documentComponent, /line\.showPrice === true/);
+  assert.match(documentComponent, /className="quote-line-amount"/);
+  assert.match(documentComponent, /money\(linePrice\)/);
 });
 
 test('recognizes integer euro prices with thousands separators without mistaking ordinary counts for prices', () => {
