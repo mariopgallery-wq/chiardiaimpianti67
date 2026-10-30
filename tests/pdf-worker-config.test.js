@@ -122,3 +122,22 @@ test('quote print layout reserves a fixed amount column and confines all article
   assert.match(css, /\.quote-line-amount\s*\{[^}]*grid-column:\s*3/s);
   assert.match(css, /@media print\s*\{[\s\S]*?\.quote-description-body\s*\{[^}]*display:\s*grid\s*!important/s);
 });
+
+
+test('editor revision history is a closed-by-default dropdown opened only by its button', async () => {
+  const app = await read('../src/App.jsx');
+  const css = await read('../src/styles.css');
+  assert.match(app, /const \[revisionHistoryOpen, setRevisionHistoryOpen\] = useState\(false\)/);
+  assert.match(app, /aria-expanded=\{revisionHistoryOpen\}/);
+  assert.match(app, /aria-controls="revision-history-panel"/);
+  assert.match(app, /revisionHistoryOpen && draft\.id && \(\(\) =>/);
+  assert.match(app, /Cronologia <ChevronDown/);
+  assert.match(css, /\.revision-toggle\[aria-expanded="true"\]/);
+});
+
+test('ARTICOLO remains left aligned when the IMPORTO column is absent', async () => {
+  const css = await read('../src/styles.css');
+  assert.match(css, /\.quote-table-header\.no-visible-amount > span:first-child \{[^}]*text-align:\s*left !important/s);
+  assert.doesNotMatch(css, /\.quote-table-header span:last-child\s*\{\s*text-align:\s*right/);
+  assert.match(css, /\.quote-table-header\.has-visible-amount > span:last-child/);
+});
