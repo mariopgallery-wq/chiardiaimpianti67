@@ -585,15 +585,14 @@ export default function App() {
     setDraft(next); setView('editor'); setShowMobileMenu(false);
   };
   const returnToArchive = () => {
-    // Le modifiche all'editor restano locali fino al comando Salva. Scartare la bozza
-    // non scrive sul workspace; per un preventivo esistente resta valida l'ultima versione salvata.
-    clearTimeout(lineDragTimer.current);
-    lineDragRef.current = null;
-    setDraggingLineId(null);
+    // Le modifiche dell'editor sono locali fino a Salva. Questo comando elimina
+    // soltanto la bozza corrente: per un preventivo esistente resta intatta
+    // l'ultima versione salvata nell'archivio.
+    finishLineDrag();
     setDraft(null);
     setView('history');
     setShowMobileMenu(false);
-    notify('Modifiche non salvate annullate. Il preventivo salvato in archivio non è stato modificato.');
+    notify('Modifiche non salvate annullate. Il preventivo salvato in archivio è rimasto invariato.');
   };
   const changeDraftCategory = (category) => setDraft(previous => {
     if (!previous) return previous;
@@ -622,31 +621,39 @@ export default function App() {
     setDraggingLineId(null);
   };
   const startLineDrag = (event, id) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.preventDefault();
     clearTimeout(lineDragTimer.current);
-    lineDragRef.current = { id, active: false };
     const target = event.currentTarget;
     const pointerId = event.pointerId;
+    lineDragRef.current = { id, active: false, target, pointerId, lastPosition: null };
+    // Capture il puntatore subito: continua a ricevere i movimenti anche se il dito
+    // esce dal numero/maniglia durante il trascinamento.
+    try { target.setPointerCapture?.(pointerId); } catch {}
     lineDragTimer.current = setTimeout(() => {
-      if (!lineDragRef.current || lineDragRef.current.id !== id) return;
-      lineDragRef.current.active = true;
+      const drag = lineDragRef.current;
+      if (!drag || drag.id !== id || drag.pointerId !== pointerId) return;
+      drag.active = true;
       setDraggingLineId(id);
-      try { target.setPointerCapture?.(pointerId); } catch {}
-    }, 450);
+    }, 380);
   };
   const moveLineDrag = (event) => {
     const drag = lineDragRef.current;
-    if (!drag?.active || !draft) return;
+    if (!drag || drag.pointerId !== event.pointerId || !draft) return;
+    if (!drag.active) return;
     event.preventDefault();
-    const rows = [...document.querySelectorAll('.description-line')];
-    const targetRow = rows.find(row => {
-      const rect = row.getBoundingClientRect();
-      return event.clientY >= rect.top && event.clientY <= rect.bottom;
-    });
+    // elementFromPoint individua la riga sotto il dito anche quando il puntatore
+    // è catturato dalla maniglia numerata.
+    const targetRow = document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.description-line[data-line-id]');
     const targetId = targetRow?.getAttribute('data-line-id');
     if (!targetId || targetId === drag.id) return;
     const rect = targetRow.getBoundingClientRect();
     const insertAfter = event.clientY > rect.top + rect.height / 2;
+    const position = `${targetId}:${insertAfter ? 'after' : 'before'}`;
+    if (drag.lastPosition === position) return;
+    drag.lastPosition = position;
     setDraft(previous => {
+      if (!previous) return previous;
       const lines = [...previous.lines];
       const from = lines.findIndex(line => line.id === drag.id);
       const to = lines.findIndex(line => line.id === targetId);
@@ -654,10 +661,22 @@ export default function App() {
       const [moved] = lines.splice(from, 1);
       let destination = to + (insertAfter ? 1 : 0);
       if (from < destination) destination -= 1;
+      destination = Math.max(0, Math.min(lines.length, destination));
+      if (destination === from) return previous;
       lines.splice(destination, 0, moved);
       return { ...previous, lines };
     });
   };
+  const moveLineByKeyboard = (id, direction) => setDraft(previous => {
+    if (!previous) return previous;
+    const from = previous.lines.findIndex(line => line.id === id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= previous.lines.length) return previous;
+    const lines = [...previous.lines];
+    const [moved] = lines.splice(from, 1);
+    lines.splice(to, 0, moved);
+    return { ...previous, lines };
+  });
   const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '', internalPrice: null }] }));
   const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '', internalPrice: null }] }));
 
@@ -846,6 +865,10 @@ export default function App() {
       .sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
   }, [db.quotes, historySearch]);
   const catalogItems = useMemo(() => db.items.filter(item => (catalogFilter === 'Tutti' || item.cat === catalogFilter) && item.desc.toLowerCase().includes(catalogSearch.toLowerCase())), [db.items, catalogFilter, catalogSearch]);
+  // Il selettore nell'editor legge l'intero catalogo dell'account attivo,
+  // senza filtri per settore o per la categoria del preventivo.
+  const editorCatalogItems = useMemo(() => (Array.isArray(db.items) ? db.items : [])
+    .filter(item => item && typeof item.desc === 'string' && item.desc.trim()), [db.items]);
   const clientItems = useMemo(() => db.clients.filter(client => [client.name, client.address, client.tax, client.place].some(value => String(value || '').toLowerCase().includes(clientSearch.toLowerCase()))), [db.clients, clientSearch]);
 
   if (passwordRecovery) return <PasswordRecoveryScreen onComplete={async () => { const result = await supabase.auth.getUser(); if (result.error) throw result.error; setPasswordRecovery(false); if (result.data.user) await hydrateUser(result.data.user); }} />;
@@ -892,13 +915,17 @@ export default function App() {
             {syncState === 'error' ? <CloudOff size={16} /> : syncState === 'synced' ? <Cloud size={16} /> : <RefreshCw size={15} className={syncState === 'saving' || syncState === 'loading' ? 'spin' : ''} />}
             <span>{syncState === 'error' ? 'Errore cloud' : syncState === 'synced' ? 'Sincronizzato' : syncState === 'saving' || syncState === 'loading' ? 'Salvataggio…' : 'Cloud'}</span>
           </div>
-          <button className="button button-primary header-new-button" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button>
+          <button className="button button-primary header-new-button" onClick={createQuote}><Plus size={17} /> {draft ? 'Riprendi preventivo' : 'Nuovo preventivo'}</button>
         </div>
       </header>
 
       {showMobileMenu && <div className="mobile-menu-overlay" onClick={() => setShowMobileMenu(false)}><div className="mobile-menu-panel" onClick={e => e.stopPropagation()}><div className="mobile-menu-head"><Brand compact /><button className="icon-button" onClick={() => setShowMobileMenu(false)}><X size={19} /></button></div>{menu.map(item => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => item.action ? item.action() : setPage(item.id)}><item.icon size={18} /><span>{item.label}</span></button>)}<button className="nav-item logout-nav" onClick={doLogout}><LogOut size={18} /><span>Esci dall’account</span></button></div></div>}
 
       <main className={`page-content page-${view}`}>
+        {draft && view !== 'editor' && <div className="draft-resume-banner" role="status">
+          <div><strong>{draft.id ? `Modifica preventivo ${draft.number || ''}`.trim() : 'Nuovo preventivo in corso'}</strong><span>Le modifiche non salvate restano disponibili mentre navighi nell’app.</span></div>
+          <button type="button" className="button button-secondary button-small" onClick={createQuote}><ArrowRight size={15} /> Riprendi preventivo</button>
+        </div>}
         {syncState === 'error' && <div className="sync-warning"><div className="sync-warning-icon"><CloudOff size={18} /></div><div className="sync-warning-copy"><strong>Salvataggio cloud da verificare</strong><p>{syncMessage}</p></div><button className="button button-small" onClick={retrySync}><RefreshCw size={15} /> Riprova</button></div>}
 
         {view === 'home' && <>
@@ -941,8 +968,8 @@ export default function App() {
                 <div className="field"><label htmlFor="q-title">Titolo della fornitura / del lavoro</label><textarea id="q-title" rows={2} value={draft.title} onChange={e => updateDraft('title', e.target.value)} placeholder="Preventivo per fornitura e posa in opera di…" /></div>
                 <div className="field"><label htmlFor="q-subtitle">Modello, quantità o specifica (facoltativo)</label><input id="q-subtitle" value={draft.subtitle} onChange={e => updateDraft('subtitle', e.target.value)} placeholder="Es. climatizzatore mono split Hisense Console 18000 BTU A++" /></div>
                 <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><textarea id="q-intro" rows={4} maxLength={4000} value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue…" /></div>
-                <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate · tieni premuto il numero per trascinare la voce</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
-                <div className="description-lines">{draft.lines.map((line, index) => { const options = db.items.filter(item => String(item?.desc || '').trim()); return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} title="Tieni premuto per spostare questa voce" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}</option>)}</select></div><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Costo interno €</label><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma costi interni inseriti</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
+                <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => line.desc.trim()).length} voci compilate · tieni premuto il numero per trascinare; Alt + ↑ / ↓ per riordinare</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
+                <div className="description-lines">{draft.lines.map((line, index) => { const options = editorCatalogItems; return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" title="Tieni premuto il numero per trascinare; Alt + freccia su/giù per spostare" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onLostPointerCapture={finishLineDrag} onKeyDown={e => { if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); moveLineByKeyboard(line.id, -1); } else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); moveLineByKeyboard(line.id, 1); } }} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}{item.cat ? ` · ${item.cat}` : ''}</option>)}</select></div><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Costo interno €</label><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma costi interni inseriti</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
                 <div className="field closing-field"><label htmlFor="q-closing">Altre condizioni / note finali</label><textarea id="q-closing" rows={3} value={draft.closing} onChange={e => updateDraft('closing', e.target.value)} placeholder="Es. escluso opere murarie, tracce e ripristini…" /></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">04</span><div><h2>Riepilogo economico</h2><p>Un solo imponibile complessivo, IVA configurabile</p></div></div>
