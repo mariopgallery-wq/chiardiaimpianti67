@@ -128,3 +128,74 @@ test('navigation preserves the draft, while explicit return to the archive disca
   assert.match(cancel, /setDraft\(null\)/, 'explicit back-to-archive action discards the current editor draft');
   assert.match(cancel, /setView\('history'\)/, 'explicit return opens the archive');
 });
+
+
+test('every quote line has an always-visible catalog selector using all entries from the active workspace', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const memoStart = app.indexOf('const editorCatalogItems = useMemo');
+  const memoEnd = app.indexOf('const clientItems', memoStart);
+  assert.ok(memoStart >= 0 && memoEnd > memoStart);
+  const catalogMemo = app.slice(memoStart, memoEnd);
+  assert.match(catalogMemo, /Array\.isArray\(db\.items\)/);
+  assert.match(catalogMemo, /\.filter\(item => item && typeof item\.desc === 'string' && item\.desc\.trim\(\)\)/);
+  assert.doesNotMatch(catalogMemo, /draft\.category|catalogFilter/);
+  const lineStart = app.indexOf('draft.lines.map((line, index)');
+  const lineEnd = app.indexOf('</div><div className="internal-cost-summary"', lineStart);
+  assert.ok(lineStart >= 0 && lineEnd > lineStart);
+  const editorLine = app.slice(lineStart, lineEnd);
+  assert.match(editorLine, /const options = editorCatalogItems/);
+  assert.match(editorLine, /<select className="insert-suggestion"/);
+  assert.match(editorLine, /Inserisci dal catalogo…/);
+  assert.match(editorLine, /Catalogo vuoto/);
+  assert.match(editorLine, /options\.map\(item => <option/);
+  assert.doesNotMatch(editorLine, /\{options\.length > 0 && <select/);
+});
+
+test('the quote preview explicitly shows a bullet for each non-empty activity', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
+  assert.match(app, /<ul className="quote-bullets">\{draft\.lines\.filter\(line => line\.desc\?\.trim\(\)\)\.map\(line => <li/);
+  assert.match(css, /\.quote-bullets\{[^}]*list-style:disc outside/);
+});
+
+test('the numbered drag handle supports long-press pointer capture and keyboard reordering', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const start = app.indexOf('const startLineDrag = (event, id) => {');
+  const move = app.indexOf('const moveLineDrag = (event) => {', start);
+  const end = app.indexOf('const moveLineByKeyboard', move);
+  assert.ok(start >= 0 && move > start && end > move);
+  const gesture = app.slice(start, end);
+  assert.match(gesture, /setPointerCapture\?\.\(pointerId\)/, 'pointer is captured immediately on the numbered handle');
+  assert.match(gesture, /}, 380\)/, 'drag starts only after a deliberate long press');
+  assert.match(gesture, /elementFromPoint\(event\.clientX, event\.clientY\)/, 'drop target is found below the pointer');
+  assert.match(app, /const moveLineByKeyboard = \(id, direction\)/);
+  assert.match(app, /moveLineByKeyboard\(line\.id, -1\)/);
+  const handleStart = app.indexOf('className="description-bullet description-drag-handle"');
+  const handleEnd = app.indexOf('</button>', handleStart);
+  const handle = app.slice(handleStart, handleEnd);
+  assert.match(handle, /onPointerDown=\{e => startLineDrag\(e, line\.id\)\}/);
+  assert.match(handle, /onPointerMove=\{moveLineDrag\}/);
+  assert.match(handle, /onLostPointerCapture=\{finishLineDrag\}/);
+  assert.match(handle, /Alt\+ArrowUp Alt\+ArrowDown/);
+});
+
+test('a draft remains resumable outside the editor and explicit return discards it without saving', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const pageStart = app.indexOf('const setPage = (id) => {');
+  const pageEnd = app.indexOf('const pageTitle', pageStart);
+  assert.ok(pageStart >= 0 && pageEnd > pageStart);
+  assert.doesNotMatch(app.slice(pageStart, pageEnd), /setDraft\(null\)/);
+  assert.match(app, /if \(draft\) \{\s*setView\('editor'\)/, 'New quote action resumes an existing draft');
+  assert.match(app, /draft && view !== 'editor' && <div className="draft-resume-banner"/);
+  assert.match(app, /onClick=\{createQuote\}>[\s\S]*?Riprendi preventivo/);
+  const cancelStart = app.indexOf('const returnToArchive = () => {');
+  const cancelEnd = app.indexOf('\n  };', cancelStart);
+  const cancel = app.slice(cancelStart, cancelEnd);
+  assert.match(cancel, /setDraft\(null\)/);
+  assert.match(cancel, /setView\('history'\)/);
+  assert.doesNotMatch(cancel, /updateDb|saveQuote|supabase/);
+  const editStart = app.indexOf('const editQuote = (quote) => {');
+  const editEnd = app.indexOf('const updateDraft', editStart);
+  assert.ok(editStart >= 0 && editEnd > editStart);
+  assert.match(app.slice(editStart, editEnd), /draft\.id === quote\.id/);
+});
