@@ -318,3 +318,19 @@ img { max-width:100%; }
   .quote-bullets li { display: flex !important; break-inside: avoid; }
   .quote-bullet-marker { display: inline-block !important; color: #111 !important; }
 }
+
+
+/* Controllo per decidere se il prezzo della singola attività appare nel PDF. */
+.import-editor-line-price { width: 142px; flex: 0 0 142px; }
+.line-price-controls { display: flex; align-items: center; gap: 5px; width: 100%; }
+.line-price-controls input { flex: 1 1 auto; min-width: 0; width: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.line-price-visibility { width: 31px; height: 31px; flex: 0 0 31px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid #dce2ed; border-radius: 7px; background: #f7f9fc; color: #69778e; }
+.line-price-visibility.is-visible { color: #176b46; border-color: #9ed8bd; background: #eaf8f1; }
+.line-price-state { display: block; margin-top: 3px; color: #8993a5; font-size: 9px; line-height: 1.2; white-space: nowrap; }
+.line-price-state.is-visible { color: #176b46; font-weight: 700; }
+.quote-line-amount { display: block; flex: 0 0 auto; min-width: 25mm; padding-left: 3mm; text-align: right; white-space: nowrap; font-size: .98em; font-weight: 700; font-variant-numeric: tabular-nums; }
+@media(max-width:640px) {
+  .import-editor-line-price { width: 116px; flex-basis: 116px; }
+  .line-price-visibility { width: 28px; height: 29px; flex-basis: 28px; }
+  .line-price-state { font-size: 8px; }
+}
