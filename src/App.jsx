@@ -931,21 +931,34 @@ export default function App() {
       .sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
   }, [db.quotes, historySearch]);
   const catalogItems = useMemo(() => db.items.filter(item => (catalogFilter === 'Tutti' || item.cat === catalogFilter) && item.desc.toLowerCase().includes(catalogSearch.toLowerCase())), [db.items, catalogFilter, catalogSearch]);
-  // Suggerisce solo descrizioni già usate in preventivi precedenti dello stesso settore.
+  // Unisce le voci del Catalogo lavori e quelle dei preventivi salvati,
+  // mostrando esclusivamente elementi della categoria selezionata.
   const editorCatalogItems = useMemo(() => {
     if (!draft?.category) return [];
+    const category = draft.category;
+    const catalogEntries = (Array.isArray(db.items) ? db.items : [])
+      .filter(item => item && item.cat === category)
+      .map((item, index) => ({
+        id: `catalog-${category}-${item.id || index}`,
+        cat: category,
+        desc: String(item.desc || '').trim(),
+      }));
+    const quoteEntries = (Array.isArray(db.quotes) ? db.quotes : [])
+      .filter(quote => quote && quote.category === category)
+      .flatMap((quote, quoteIndex) => (Array.isArray(quote.lines) ? quote.lines : [])
+        .map((line, lineIndex) => ({
+          id: `quote-${category}-${quote.id || quoteIndex}-${line.id || lineIndex}`,
+          cat: category,
+          desc: String(line?.desc || '').trim(),
+        })));
     const seen = new Set();
-    return (Array.isArray(db.quotes) ? db.quotes : [])
-      .filter(quote => quote && quote.category === draft.category)
-      .flatMap(quote => Array.isArray(quote.lines) ? quote.lines : [])
-      .map((line, index) => ({ id: `quote-${draft.category}-${index}`, cat: draft.category, desc: String(line?.desc || '').trim() }))
-      .filter(item => {
-        const key = item.desc.toLocaleLowerCase('it-IT');
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-  }, [db.quotes, draft?.category]);
+    return [...catalogEntries, ...quoteEntries].filter(item => {
+      const key = item.desc.toLocaleLowerCase('it-IT');
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [db.items, db.quotes, draft?.category]);
   const clientItems = useMemo(() => db.clients.filter(client => [client.name, client.address, client.tax, client.place, client.phone, client.email, client.pec].some(value => String(value || '').toLowerCase().includes(clientSearch.toLowerCase()))), [db.clients, clientSearch]);
 
   if (passwordRecovery) return <PasswordRecoveryScreen onComplete={async () => { const result = await supabase.auth.getUser(); if (result.error) throw result.error; setPasswordRecovery(false); if (result.data.user) await hydrateUser(result.data.user); }} />;
@@ -1039,7 +1052,8 @@ export default function App() {
                 <div className="field"><label htmlFor="q-client">Nome / ragione sociale *</label><input id="q-client" list="client-suggestions" autoComplete="off" value={draft.client} onChange={e => { const value = e.target.value; updateDraft('client', value); const match = db.clients.find(c => escapeName(c.name) === escapeName(value)); if (match) setDraft(prev => ({ ...prev, client: value, address: match.address || '', tax: match.tax || '', place: match.place || '', phone: match.phone || '', email: match.email || '', pec: match.pec || '' })); }} placeholder="Es. Mario Rossi" /><datalist id="client-suggestions">{db.clients.map(c => <option value={c.name} key={c.name} />)}</datalist></div>
                 <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-address">Indirizzo / descrizione cliente</label><input id="q-address" value={draft.address} onChange={e => updateDraft('address', e.target.value)} placeholder="Via, numero civico" /></div><div className="field"><label htmlFor="q-tax">Codice fiscale / P. IVA</label><input id="q-tax" value={draft.tax} onChange={e => updateDraft('tax', e.target.value)} placeholder="Codice fiscale o partita IVA" /></div></div>
                 <div className="field"><label htmlFor="q-place">Località / nota anagrafica</label><input id="q-place" value={draft.place} onChange={e => updateDraft('place', e.target.value)} placeholder="CAP, città o riferimento" /></div>
-                 <div className="form-grid form-grid-three">
+                <div className="client-contact-heading"><strong>Recapiti del cliente</strong><span>Facoltativi · puoi lasciarli vuoti</span></div>
+                 <div className="form-grid form-grid-three client-contact-fields">
                    <div className="field"><label htmlFor="q-phone">Numero di telefono (facoltativo)</label><input id="q-phone" type="tel" autoComplete="tel" value={draft.phone || ''} onChange={e => updateDraft('phone', e.target.value)} placeholder="Es. 333 1234567" /></div>
                    <div className="field"><label htmlFor="q-email">E-mail (facoltativa)</label><input id="q-email" type="email" autoComplete="email" value={draft.email || ''} onChange={e => updateDraft('email', e.target.value)} placeholder="nome@email.it" /></div>
                    <div className="field"><label htmlFor="q-pec">PEC (facoltativa)</label><input id="q-pec" type="email" value={draft.pec || ''} onChange={e => updateDraft('pec', e.target.value)} placeholder="nome@pec.it" /></div>
