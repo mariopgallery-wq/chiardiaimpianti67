@@ -385,6 +385,12 @@ function buildQuotePdfBasename(quote = {}) {
 function QuoteDocument({ draft, settings }) {
   const sums = calcTotal(draft);
   const logoSrc = settings.logoData || LOGO_URL;
+  // L'intestazione IMPORTO compare solo se almeno una voce ha un prezzo
+  // valorizzato e abilitato alla stampa.
+  const hasVisibleLinePrice = (draft.lines || []).some(line => {
+    const value = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
+    return line.showPrice === true && value !== null && value !== '' && Number.isFinite(Number(value));
+  });
   return <article className="quote-document" id="quote-document">
     <header className="quote-doc-header">
       <div className="quote-company">
@@ -416,7 +422,10 @@ function QuoteDocument({ draft, settings }) {
         <div className="payment-line"><span>Termini:</span><strong>{(draft.payment || '').split('\n').map((part, i) => <React.Fragment key={i}>{i > 0 && <br />}{part}</React.Fragment>)}</strong></div>
       </div>
     </section>
-    <div className="quote-table-header"><span>ARTICOLO</span><span>IMPORTO</span></div>
+    <div className={`quote-table-header${hasVisibleLinePrice ? ' has-visible-amount' : ' no-visible-amount'}`}>
+      <span>ARTICOLO</span>
+      {hasVisibleLinePrice && <span>IMPORTO</span>}
+    </div>
     <section className="quote-description-body">
       <div className="quote-title-text">{draft.title || 'Preventivo per fornitura e posa in opera'}</div>
       {draft.subtitle && <div className="quote-subtitle-text">{draft.subtitle}</div>}
