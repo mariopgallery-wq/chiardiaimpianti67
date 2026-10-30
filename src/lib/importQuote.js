@@ -20,11 +20,16 @@ const euroNumber = (value) => {
 
 const normalizeText = (value) => String(value || '')
   .replace(/\u00a0/g, ' ')
-  .replace(/[\u2010-\u2015]/g, '-')
+  .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
   .replace(/[\t ]+/g, ' ')
   .trim();
 
 const lineText = (line) => normalizeText(typeof line === 'string' ? line : line?.text);
+// Elenco dei marcatori usati normalmente nei preventivi: trattini, pallini,
+// quadratini, simboli di spunta e numerazioni. Sono riconosciuti solo a inizio riga.
+const BULLET_PREFIX = /^(?:[-]|[•●▪▫◦‣∙·*■□✓✔☑]|\d+[.)])\s*/u;
+const isBulletLineText = (value) => BULLET_PREFIX.test(lineText(value));
+const removeBulletPrefix = (value) => lineText(value).replace(BULLET_PREFIX, '').trim();
 const lineTextForRegion = (line, minX, maxX = 1) => {
   if (!Array.isArray(line?.segments) || !line.segments.length) return lineText(line);
   return normalizeText(line.segments.filter(segment => Number(segment.x ?? 0) >= minX && Number(segment.x ?? 0) < maxX).map(segment => segment.text || '').join(' '));
@@ -146,7 +151,7 @@ function parseLayoutFields(layoutLines, all, db, fileName = '') {
   const firstPage = sorted.filter(line => Number(line.page || 1) === 1);
   const tableIndex = findTableStart(firstPage);
   const tableLine = tableIndex >= 0 ? firstPage[tableIndex] : null;
-  const fallbackBodyIndex = tableIndex < 0 ? firstPage.findIndex(line => /^(?:preventivo per|offerta per|si precisa quanto segue|fornitura e posa|realizzazione di|installazione di|il preventivo include)/i.test(lineText(line))) : -1;
+  const fallbackBodyIndex = tableIndex < 0 ? firstPage.findIndex(line => isBulletLineText(line) || /^(?:preventivo per|offerta per|si precisa quanto segue|fornitura e posa|realizzazione di|installazione di|il preventivo include)/i.test(lineText(line))) : -1;
   const tableY = Number(tableLine?.yNorm ?? (fallbackBodyIndex >= 0 ? firstPage[fallbackBodyIndex]?.yNorm : 0.34));
   const beforeTable = tableIndex >= 0 ? firstPage.slice(0, tableIndex) : firstPage.filter(line => Number(line.yNorm ?? line.y ?? 0) < tableY);
   const num = parseNumber(beforeTable.filter(line => Number(line.x ?? line.xNorm ?? 0) > 0.42), beforeTable.map(line => lineTextForRegion(line, 0.42, 1)).join('\n')) || parseNumber(beforeTable, all) || parseNumber([], '', fileName);
@@ -223,7 +228,7 @@ function bodyStringsFromText(lines) {
   }
   const start = lines.findIndex((line) => {
     const text = lineText(line);
-    return /^(?:preventivo per|fornitura e posa|installazione di|realizzazione di|sopralluogo e|si precisa quanto segue|il preventivo include|fornitura di n\.?\s*\d)/i.test(text) && !isHeaderCompanyLine(text);
+    return (isBulletLineText(text) || /^(?:preventivo per|fornitura e posa|installazione di|realizzazione di|sopralluogo e|si precisa quanto segue|il preventivo include|fornitura di n\.?\s*\d)/i.test(text)) && !isHeaderCompanyLine(text);
   });
   const from = start >= 0 ? start : 0;
   const footerIndex = findFooterStart(lines, from);
@@ -264,8 +269,49 @@ function joinPhysicalBodyLines(bodyLines) {
   return output;
 }
 
+function mergeMarkedBulletRows(paragraphs) {
+  // Se il documento usa i trattini come separatori, ogni riga marcata apre
+  // una nuova voce. Le righe subito successive senza marcatore sono il seguito
+  // della stessa descrizione e vengono mantenute nella medesima textarea.
+  if (!paragraphs.some(row => isBulletLineText(row?.text))) return paragraphs;
+
+  const output = [];
+  let currentBullet = null;
+  const flush = () => {
+    if (currentBullet) output.push(currentBullet);
+    currentBullet = null;
+  };
+  const isBoundary = (text) => isMoneySummaryLine(text) ||
+    /^(?:altre condizioni|note finali|condizioni finali|totale lavori|riepilogo|cordiali saluti|distinti saluti|firma)\b/i.test(text) ||
+    /^(?:il\s+)?(?:preventivo include|preventivo comprende|tutto comprende|inoltre include|lavori inclusi|prestazioni incluse)\s*:?$/i.test(text);
+
+  for (const row of paragraphs) {
+    const text = lineText(row?.text);
+    if (!text) continue;
+    if (isBulletLineText(text)) {
+      flush();
+      currentBullet = { ...row, text: removeBulletPrefix(text), hasBullet: true };
+      continue;
+    }
+    if (currentBullet && isBoundary(text)) {
+      flush();
+      output.push({ ...row, text });
+      continue;
+    }
+    if (currentBullet) {
+      // La newline è intenzionale: la voce resta unica, ma il testo importato
+      // conserva la struttura delle righe che andranno nella stessa casella.
+      currentBullet.text = currentBullet.text ? `${currentBullet.text}\n${text}` : text;
+    } else {
+      output.push({ ...row, text });
+    }
+  }
+  flush();
+  return output;
+}
+
 function extractStructuredBody(bodyLines, db) {
-  const paragraphs = joinPhysicalBodyLines(bodyLines);
+  const paragraphs = mergeMarkedBulletRows(joinPhysicalBodyLines(bodyLines));
   const texts = paragraphs.map(row => normalizeText(row.text)).filter(Boolean);
   let title = '';
   let subtitle = '';
@@ -308,8 +354,8 @@ function extractStructuredBody(bodyLines, db) {
 
   const lines = [];
   for (const item of remaining) {
-    const parsed = amountAtEnd(item.replace(/^(?:[•●▪◦-])\s*/, ''));
-    const desc = parsed.desc.replace(/^\d+[.)\-]\s*/, '').trim();
+    const parsed = amountAtEnd(removeBulletPrefix(item));
+    const desc = removeBulletPrefix(parsed.desc).replace(/^\d+[.)\-]\s*/, '').trim();
     if (!desc || sectionHeading.test(desc) || isMoneySummaryLine(desc) || isHeaderCompanyLine(desc) || isClientMetaLabel(desc) || /^(?:ARTICOLO|IMPORTO|DESCRIZIONE|PREZZO)$/i.test(desc)) continue;
     lines.push({ desc, amount: parsed.amount });
   }
