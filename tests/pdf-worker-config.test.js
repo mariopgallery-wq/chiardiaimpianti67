@@ -98,9 +98,10 @@ test('client phone, email and PEC are optional quote fields saved and printed', 
   }
 });
 
-test('editor catalog suggestions only use descriptions from previous quotes of the selected category', async () => {
+test('editor catalog suggestions combine catalog and saved quotes only within the selected category', async () => {
   const app = await read('../src/App.jsx');
-  assert.match(app, /filter\(quote => quote && quote\.category === draft\.category\)/);
-  assert.ok(app.includes('[db.quotes, draft?.category]'));
+  assert.match(app, /filter\(item => item && item\.cat === category\)/);
+  assert.match(app, /filter\(quote => quote && quote\.category === category\)/);
+  assert.ok(app.includes('[db.items, db.quotes, draft?.category]'));
   assert.ok(app.includes('const options = editorCatalogItems'));
 });
