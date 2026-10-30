@@ -421,7 +421,7 @@ function QuoteDocument({ draft, settings }) {
       <div className="quote-title-text">{draft.title || 'Preventivo per fornitura e posa in opera'}</div>
       {draft.subtitle && <div className="quote-subtitle-text">{draft.subtitle}</div>}
       {draft.intro && <p className="quote-intro">{draft.intro}</p>}
-      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => <li key={line.id}><span>{line.desc}</span></li>)}</ul>}
+      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => <li key={line.id}><span className="quote-bullet-marker" aria-hidden="true">•</span><span className="quote-bullet-text">{line.desc}</span></li>)}</ul>}
       {draft.closing && <p className="quote-closing">{draft.closing}</p>}
     </section>
     <footer className="quote-doc-footer">
