@@ -77,3 +77,30 @@ test('GitHub Pages deploy runs only on manual request after all files are upload
   assert.match(workflow, /if:\s*github\.ref == ['"]refs\/heads\/main['"]/);
   assert.match(workflow, /cancel-in-progress:\s*false/, 'a later upload must not cancel a deployment already requested');
 });
+
+
+test('quote line descriptions preserve line breaks in the printed bullet list', async () => {
+  const app = await read('../src/App.jsx');
+  const css = await read('../src/styles.css');
+  assert.ok(app.includes('<span>{line.desc}</span>'));
+  assert.match(css, /\.quote-bullets li\s*>\s*span\s*\{[^}]*white-space:\s*pre-line/s);
+  assert.ok(app.includes("desc: String(line.desc || '').trim()"));
+});
+
+test('client phone, email and PEC are optional quote fields saved and printed', async () => {
+  const app = await read('../src/App.jsx');
+  const domain = await read('../src/lib/domain.js');
+  for (const field of ['phone', 'email', 'pec']) {
+    assert.ok(app.includes(`id="q-${field}"`));
+    assert.ok(app.includes(`{draft.${field} && <div>`));
+    assert.ok(domain.includes(`${field}: ''`));
+    assert.ok(domain.includes(`String(q.${field} || '')`));
+  }
+});
+
+test('editor catalog suggestions only use descriptions from previous quotes of the selected category', async () => {
+  const app = await read('../src/App.jsx');
+  assert.match(app, /filter\(quote => quote && quote\.category === draft\.category\)/);
+  assert.ok(app.includes('[db.quotes, draft?.category]'));
+  assert.ok(app.includes('const options = editorCatalogItems'));
+});
