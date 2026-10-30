@@ -277,6 +277,19 @@ img { max-width:100%; }
    La cronologia e i controlli di ripristino restano disponibili nell'editor,
    ma non entrano mai nel documento stampato. */
 @media print {
+  /* Isolamento assoluto del documento: cronologia, ripristini e ogni controllo
+     dell'editor restano nel browser ma non possono comparire su carta/PDF. */
+  body.print-quote-only * {
+    visibility: hidden !important;
+  }
+  body.print-quote-only #quote-document,
+  body.print-quote-only #quote-document * {
+    visibility: visible !important;
+  }
+  body.print-quote-only #quote-document {
+    position: relative !important;
+  }
+
   .page-editor > :not(.editor-layout) {
     display: none !important;
   }
