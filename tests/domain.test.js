@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal,
   quoteNumber, newDraft, escapeName, formatDate,
@@ -100,4 +101,30 @@ test('normalization ignores malformed trash entries but keeps valid workspace da
   assert.equal(db.quotes.length, 1);
   assert.equal(db.trash.length, 1);
   assert.equal(db.trash[0].type, 'client');
+});
+
+
+test('the description number is the drag handle and text editing does not start a drag', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const handleIndex = app.indexOf('className="description-bullet description-drag-handle"');
+  assert.ok(handleIndex >= 0, 'numbered drag handle should exist beside each description');
+  const handle = app.slice(handleIndex, app.indexOf('</button>', handleIndex));
+  assert.match(handle, /onPointerDown=\{e => startLineDrag\(e, line\.id\)\}/);
+  assert.match(handle, /onPointerMove=\{moveLineDrag\}/);
+  const lineIndex = app.indexOf('aria-label={`Descrizione lavoro ${index + 1}`}');
+  const textarea = app.slice(lineIndex, app.indexOf('/>', lineIndex));
+  assert.doesNotMatch(textarea, /onPointerDown|startLineDrag/, 'drag gesture must not interfere with typing/selecting text');
+});
+
+test('navigation preserves the draft, while explicit return to the archive discards only unsaved editor state', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const pageStart = app.indexOf('const setPage = (id) => {');
+  const pageEnd = app.indexOf('const pageTitle', pageStart);
+  assert.ok(pageStart >= 0 && pageEnd > pageStart);
+  assert.doesNotMatch(app.slice(pageStart, pageEnd), /setDraft\(null\)/, 'ordinary section navigation must keep the draft');
+  const cancelStart = app.indexOf('const returnToArchive = () => {');
+  const cancelEnd = app.indexOf('\n  };', cancelStart);
+  const cancel = app.slice(cancelStart, cancelEnd);
+  assert.match(cancel, /setDraft\(null\)/, 'explicit back-to-archive action discards the current editor draft');
+  assert.match(cancel, /setView\('history'\)/, 'explicit return opens the archive');
 });
