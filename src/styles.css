@@ -305,3 +305,16 @@ img { max-width:100%; }
   white-space: pre-line;
   overflow-wrap: anywhere;
 }
+
+
+/* Indicatore puntato esplicito: i li sono flex per allineare descrizioni e importi,
+   quindi il marcatore nativo list-style non viene disegnato da tutti i browser. */
+.quote-bullets { list-style: none !important; }
+.quote-bullets li { display: flex !important; align-items: flex-start; gap: 5px; }
+.quote-bullet-marker { display: inline-block !important; flex: 0 0 13px !important; width: 13px; color: #111 !important; font-size: 1.2em; font-weight: 800; line-height: inherit; text-align: center; }
+.quote-bullet-text { display: block; flex: 1 1 auto; min-width: 0; white-space: pre-line; overflow-wrap: anywhere; }
+@media print {
+  .quote-bullets { list-style: none !important; }
+  .quote-bullets li { display: flex !important; break-inside: avoid; }
+  .quote-bullet-marker { display: inline-block !important; color: #111 !important; }
+}
