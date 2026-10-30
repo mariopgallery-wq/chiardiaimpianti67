@@ -1,9 +1,7 @@
+
 name: Deploy Preventivi Pro to GitHub Pages
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -13,11 +11,10 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
-    # Pin the runner image instead of following ubuntu-latest migrations.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -33,33 +30,14 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v6
 
-      - name: Install dependencies (with network retries)
+      - name: Install dependencies
         timeout-minutes: 15
-        shell: bash
-        run: |
-          set -euo pipefail
-          installed=false
-          for attempt in 1 2 3; do
-            echo "Installazione dipendenze, tentativo ${attempt}/3"
-            if npm install --no-audit --no-fund --prefer-online --fetch-retries=5 --fetch-timeout=120000; then
-              installed=true
-              break
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              sleep 10
-            fi
-          done
-          if [ "$installed" != "true" ]; then
-            echo "ERRORE: impossibile installare le dipendenze npm dopo 3 tentativi."
-            exit 1
-          fi
-          npm ls --depth=0
-          npm ls tesseract.js --depth=0
+        run: npm install --no-audit --no-fund --prefer-online --fetch-retries=5 --fetch-timeout=120000
 
       - name: Run automated tests
         run: npm test
 
-      - name: Compile React application with Vite
+      - name: Compile React application
         run: npm run build
 
       - name: Verify compiled website
@@ -70,21 +48,20 @@ jobs:
           test -d dist/assets
           find dist/assets -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -size +0c | grep -q .
           if grep -q 'src/main.jsx' dist/index.html; then
-            echo "ERRORE: nell'HTML pubblicato è rimasto il riferimento sorgente a src/main.jsx."
+            echo "ERRORE: riferimento sorgente non compilato."
             exit 1
           fi
-          test -s dist/pdf.worker.min.mjs
-          worker_bytes=$(wc -c < dist/pdf.worker.min.mjs)
-          if [ "$worker_bytes" -lt 100000 ]; then
-            echo "ERRORE: dist/pdf.worker.min.mjs è troppo piccolo; potrebbe essere una pagina HTML di errore."
+          worker_file=$(find dist/assets -maxdepth 1 -type f -name 'pdf.worker*.mjs' -size +100k -print -quit)
+          if [ -z "$worker_file" ]; then
+            echo "ERRORE: worker PDF.js non trovato."
             exit 1
           fi
-          first_char=$(head -c 1 dist/pdf.worker.min.mjs)
+          first_char=$(head -c 1 "$worker_file")
           if [ "$first_char" = "<" ]; then
-            echo "ERRORE: il worker PDF contiene HTML invece di JavaScript."
+            echo "ERRORE: il worker PDF contiene HTML."
             exit 1
           fi
-          echo "Verifica build completata: HTML, asset React e worker PDF presenti."
+          echo "Verifica completata."
 
       - name: Upload compiled website
         uses: actions/upload-pages-artifact@v5
@@ -92,6 +69,7 @@ jobs:
           path: dist
 
   deploy:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
