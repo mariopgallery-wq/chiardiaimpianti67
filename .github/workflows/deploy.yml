@@ -72,7 +72,18 @@ jobs:
             echo "ERRORE: nell'HTML pubblicato è rimasto il riferimento sorgente a src/main.jsx."
             exit 1
           fi
-          echo "Verifica build completata: dist contiene HTML e asset compilati."
+          test -s dist/pdf.worker.min.mjs
+          worker_bytes=$(wc -c < dist/pdf.worker.min.mjs)
+          if [ "$worker_bytes" -lt 100000 ]; then
+            echo "ERRORE: dist/pdf.worker.min.mjs è troppo piccolo; potrebbe essere una pagina HTML di errore."
+            exit 1
+          fi
+          first_char=$(head -c 1 dist/pdf.worker.min.mjs)
+          if [ "$first_char" = "<" ]; then
+            echo "ERRORE: il worker PDF contiene HTML invece di JavaScript."
+            exit 1
+          fi
+          echo "Verifica build completata: HTML, asset React e worker PDF presenti."
 
       - name: Upload compiled website
         uses: actions/upload-pages-artifact@v5
