@@ -159,3 +159,84 @@ test('uses the number at the start of the filename only when the document itself
   assert.equal(result.client, 'DIMATTIA GIUSEPPE');
   assert.ok(result.lines.every(line => !/DIMATTIA|LODI|CHIARADIA/.test(line.desc)));
 });
+
+test('imports hyphen-led rows as separate work items and appends unmarked wrapped text to the preceding item', () => {
+  const text = `Preventivo n. P 21.26\nData: 12/05/2026\nCliente: Mario Rossi\nARTICOLO IMPORTO\nIl preventivo include:\n- Prima voce, parte iniziale\ncontinua la prima voce senza un nuovo trattino\n- Seconda voce, parte iniziale\ncontinuazione della seconda voce\n- Terza voce\nTotale imponibile: 1.500,00 €`;
+  const result = parseQuoteText(text, 'elenco-trattini.pdf', { settings: { defaultVat: 10 } });
+  assert.deepEqual(result.lines.map(line => line.desc), [
+    'Prima voce, parte iniziale\ncontinua la prima voce senza un nuovo trattino',
+    'Seconda voce, parte iniziale\ncontinuazione della seconda voce',
+    'Terza voce',
+  ]);
+  assert.equal(result.lines.length, 3);
+});
+
+test('recognizes different PDF/OCR bullet glyphs and a marker extracted on its own line', () => {
+  const text = `Cliente: Mario Rossi\nARTICOLO IMPORTO\n-\nFornitura e posa quadro elettrico 1.200,00 €\n– Installazione prese e comandi\n• Collegamento e verifica\n▪ Prova finale\nTotale imponibile: 1.500,00 €`;
+  const result = parseQuoteText(text, 'marcatori-pdf.pdf', { settings: { defaultVat: 10 } });
+  assert.deepEqual(result.lines.map(line => line.desc), [
+    'Fornitura e posa quadro elettrico',
+    'Installazione prese e comandi',
+    'Collegamento e verifica',
+    'Prova finale',
+  ]);
+  assert.equal(result.lines[0].amount, 1200);
+});
+
+test('uses PDF layout positions to keep marked rows separate and join their unmarked wrapped continuation', () => {
+  const texts = [
+    'ARTICOLO IMPORTO',
+    '- Prima voce, parte iniziale',
+    'continua la prima voce',
+    '- Seconda voce, parte iniziale',
+    'continua la seconda voce',
+    '- Terza voce',
+    'Totale imponibile: 1.500,00 €',
+    'IVA 10%: 150,00 €',
+    'Totale: 1.650,00 €',
+  ];
+  const positions = [0.20, 0.25, 0.265, 0.31, 0.325, 0.37, 0.90, 0.93, 0.96];
+  const layoutLines = texts.map((text, index) => ({
+    text, page: 1, yNorm: positions[index], top: positions[index] * 842,
+    x: 0.08, xEnd: 0.75, fontSize: 10,
+    segments: [{ text, x: 0.08, xEnd: 0.75, fontSize: 10 }],
+  }));
+  const result = parseQuoteText(texts.join('\\n'), 'layout-elenco.pdf', { settings: { defaultVat: 10 } }, { layoutLines });
+  assert.deepEqual(result.lines.map(line => line.desc), [
+    'Prima voce, parte iniziale continua la prima voce',
+    'Seconda voce, parte iniziale continua la seconda voce',
+    'Terza voce',
+  ]);
+});
+
+test('does not merge ordinary unmarked document rows when the imported file has no bullet markers', () => {
+  const text = `Preventivo n. P 22.26\nData: 13/05/2026\nCliente: Mario Rossi\nARTICOLO IMPORTO\nInstallazione punto luce\nFornitura materiale\nTotale imponibile: 300,00 €`;
+  const result = parseQuoteText(text, 'senza-elenco.pdf', { settings: { defaultVat: 10 } });
+  assert.deepEqual(result.lines.map(line => line.desc), ['Installazione punto luce', 'Fornitura materiale']);
+});
+
+test('starts PDF description extraction at the first hyphen-led work item when no table heading exists', () => {
+  const texts = [
+    'CHIARADIA IMPIANTI',
+    'Cliente: Mario Rossi',
+    'P 23.26',
+    'Data: 14/05/2026',
+    '- Fornitura e posa linea elettrica',
+    'tratto dal quadro al locale tecnico',
+    '- Installazione protezioni',
+    'Totale imponibile: 900,00 €',
+    'IVA 10%: 90,00 €',
+    'Totale: 990,00 €',
+  ];
+  const positions = [0.07, 0.19, 0.20, 0.22, 0.38, 0.395, 0.44, 0.90, 0.93, 0.96];
+  const layoutLines = texts.map((text, index) => ({
+    text, page: 1, yNorm: positions[index], top: positions[index] * 842,
+    x: 0.08, xEnd: 0.75, fontSize: 10,
+    segments: [{ text, x: 0.08, xEnd: 0.75, fontSize: 10 }],
+  }));
+  const result = parseQuoteText(texts.join('\\n'), 'senza-intestazione-tabella.pdf', { settings: { defaultVat: 10 } }, { layoutLines });
+  assert.deepEqual(result.lines.map(line => line.desc), [
+    'Fornitura e posa linea elettrica tratto dal quadro al locale tecnico',
+    'Installazione protezioni',
+  ]);
+});
