@@ -140,12 +140,15 @@ test('quote editor exposes three distinct optional customer contact fields', asy
   assert.match(contacts, /facoltativo/);
 });
 
-test('each non-empty activity has a visible bullet in the quote preview', async () => {
+test('each non-empty activity has an explicit bullet marker in preview and print, including flex list rows', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
   assert.match(app, /<ul className="quote-bullets">\{draft\.lines\.filter\(line => line\.desc\?\.trim\(\)\)\.map\(line => <li/);
-  assert.match(css, /\.quote-bullets\{[^}]*list-style:disc outside/);
-  assert.match(css, /\.quote-bullets li\{[^}]*display:list-item/);
+  assert.match(app, /className="quote-bullet-marker"[^>]*>•<\/span>/);
+  assert.match(css, /\.quote-bullets li\s*\{[^}]*display:flex/s);
+  assert.match(css, /\.quote-bullet-marker\s*\{[^}]*display:\s*inline-block/s);
+  const printStyles = css.slice(css.lastIndexOf('@media print'));
+  assert.match(printStyles, /\.quote-bullet-marker/);
 });
 
 test('the numbered activity handle supports deliberate long-press drag and keyboard reordering', async () => {
