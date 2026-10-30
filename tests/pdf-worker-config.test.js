@@ -29,7 +29,12 @@ test('the customer name keeps the exact letter case entered and printed', async 
 });
 
 test('printing shows only the A4 quote template and excludes editor revision history', async () => {
+  const app = await read('../src/App.jsx');
   const css = await read('../src/styles.css');
+  assert.match(app, /document\.body\.classList\.add\('print-quote-only'\)/);
+  assert.match(app, /document\.body\.classList\.remove\('print-quote-only'\)/);
+  assert.match(css, /body\.print-quote-only \*\s*\{\s*visibility:\s*hidden\s*!important/i);
+  assert.match(css, /body\.print-quote-only #quote-document,\s*body\.print-quote-only #quote-document \*\s*\{\s*visibility:\s*visible\s*!important/i);
   assert.match(css, /@page\s*\{\s*size\s*:\s*A4 portrait/i);
   assert.match(css, /\.page-editor\s*>\s*:not\(\.editor-layout\)\s*\{\s*display:\s*none\s*!important/i);
   assert.match(css, /\.revision-history-card\s*,[\s\S]*?display:\s*none\s*!important/i);
@@ -48,7 +53,7 @@ test('PDF save suggests a filename from quote number, customer, address, categor
   assert.ok(app.includes('safeFilenamePart(quote.category)'));
   assert.ok(app.includes("'Chiaradia Impianti'"));
   assert.ok(app.includes('document.title = buildQuotePdfBasename(draft);'));
-  assert.ok(app.includes("window.addEventListener('afterprint', restoreTitle, { once: true });"));
+  assert.ok(app.includes("window.addEventListener('afterprint', restorePrintState, { once: true });"));
   assert.equal((app.match(/onClick=\{printQuote\}/g) || []).length, 3);
   assert.doesNotMatch(app, /onClick=\{\(\) => window\.print\(\)\}/);
 });
@@ -105,4 +110,15 @@ test('editor catalog suggestions combine catalog and saved quotes only within th
   assert.match(app, /filter\(quote => quote && quote\.category === category\)/);
   assert.ok(app.includes('[db.items, db.quotes, draft?.category]'));
   assert.ok(app.includes('const options = editorCatalogItems'));
+});
+
+test('quote print layout reserves a fixed amount column and confines all article text to its column', async () => {
+  const css = await read('../src/styles.css');
+  assert.match(css, /--quote-amount-column:\s*28mm/);
+  assert.match(css, /\.quote-table-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+var\(--quote-amount-column\)/s);
+  assert.match(css, /\.quote-description-body\s*\{[^}]*display:\s*grid\s*!important[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+var\(--quote-amount-column\)/s);
+  assert.match(css, /\.quote-description-body\s*>\s*:not\(\.quote-bullets\)\s*\{[^}]*grid-column:\s*1/s);
+  assert.match(css, /\.quote-bullets li\s*\{[^}]*grid-template-columns:\s*4mm\s+minmax\(0,\s*1fr\)\s+var\(--quote-amount-column\)/s);
+  assert.match(css, /\.quote-line-amount\s*\{[^}]*grid-column:\s*3/s);
+  assert.match(css, /@media print\s*\{[\s\S]*?\.quote-description-body\s*\{[^}]*display:\s*grid\s*!important/s);
 });
