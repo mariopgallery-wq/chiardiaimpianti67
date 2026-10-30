@@ -50,7 +50,7 @@ export function normalizeDb(value) {
       subtitle: String(q.subtitle || ''), intro: String(q.intro || ''), closing: String(q.closing || ''),
       payment: String(q.payment ?? settings.payment ?? DEFAULT_SETTINGS.payment),
       lines: Array.isArray(q.lines) ? q.lines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
-        ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''),
+        ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''), showPrice: line.showPrice === true,
       })) : [],
       net, vatRate,
       vat: Number.isFinite(Number(q.vat)) && q.vat !== undefined ? Number(q.vat) : vat,
@@ -85,7 +85,7 @@ export function newDraft(db = defaultDb()) {
     client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
     title: 'Preventivo per fornitura e posa in opera di',
     subtitle: '', intro: 'Si precisa quanto segue:',
-    lines: [{ id: `l${Date.now()}`, desc: '' }],
+    lines: [{ id: `l${Date.now()}`, desc: '', internalPrice: null, showPrice: false }],
     closing: '', net: 0, vatRate: Number(settings.defaultVat ?? DEFAULT_SETTINGS.defaultVat),
   };
 }
