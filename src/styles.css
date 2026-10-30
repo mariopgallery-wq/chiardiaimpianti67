@@ -298,3 +298,10 @@ img { max-width:100%; }
     break-inside: auto !important;
   }
 }
+
+
+/* Mantiene gli a capo inseriti nella descrizione all'interno della stessa voce puntata. */
+.quote-bullets li > span {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
