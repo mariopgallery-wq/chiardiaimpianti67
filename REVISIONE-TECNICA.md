@@ -1,4 +1,4 @@
-[REVISIONE-TECNICA.md](https://github.com/user-attachments/files/34183074/REVISIONE-TECNICA.md)
+[REVISIONE-TECNICA.md](https://github.com/user-attachments/files/34206345/REVISIONE-TECNICA.md)
 # Revisione tecnica — Preventivi Pro · Chiaradia Impianti
 
 Data revisione: 30 ottobre 2026
@@ -52,3 +52,8 @@ La build Vite completa non è stata eseguita localmente: `npm install` è andato
 Estrarre lo ZIP e caricare nella radice del repository il contenuto della cartella `chiardiaimpianti67-main/`, mantenendo tutti i percorsi inclusa `.github/workflows/deploy.yml`. Il workflow non si avvia sui push. Dopo l'aggiornamento di tutti i file, avviare manualmente il deploy da Actions sul branch `main`.
 
 Non eseguire `SUPABASE_SETUP.sql` se Supabase è già configurato.
+
+
+## Aggiornamenti 31/10/2026
+
+La build Vite emette un service worker versionato sugli asset hashati. Il client lo registra su GitHub Pages usando la base relativa del repository; al successivo avvio con rete il service worker rileva il deploy, attiva la nuova cache e ricarica l'app. Il parser anagrafico limita l'estrazione P. IVA alla porzione del documento successiva al riconoscimento del destinatario.
