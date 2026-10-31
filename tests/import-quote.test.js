@@ -242,3 +242,33 @@ test('starts PDF description extraction at the first hyphen-led work item when n
     'Installazione protezioni',
   ]);
 });
+
+test('does not assign the supplier VAT number to a customer when supplier and customer VAT appear in the same PDF header', () => {
+  const rows = [
+    ['CHIARADIA IMPIANTI', 0.08, 0.08],
+    ['P. IVA 08623720722', 0.17, 0.08],
+    ['P 44.26', 0.20, 0.72],
+    ['ROSSI SRL', 0.23, 0.08],
+    ['P. IVA 12345678901', 0.255, 0.08],
+    ['Via Roma 10', 0.28, 0.08],
+    ['Data: 30/10/2026', 0.23, 0.72],
+    ['ARTICOLO IMPORTO', 0.34, 0.08],
+    ['Installazione impianto elettrico', 0.40, 0.08],
+    ['Totale imponibile: 1.000,00 €', 0.90, 0.08],
+  ];
+  const layoutLines = rows.map(([text, yNorm, x]) => ({
+    text, page: 1, yNorm, top: yNorm * 842, x, xEnd: x + 0.25, fontSize: 10,
+    segments: [{ text, x, xEnd: x + 0.25, fontSize: 10 }],
+  }));
+  const result = parseQuoteText(rows.map(row => row[0]).join('\n'), 'rossi.pdf', { settings: { defaultVat: 10 } }, { layoutLines });
+  assert.equal(result.client, 'ROSSI SRL');
+  assert.equal(result.tax, '12345678901');
+  assert.equal(result.address, 'Via Roma 10');
+});
+
+test('does not reuse supplier VAT in a plain-text import when the customer has no tax identifier', () => {
+  const text = `CHIARADIA IMPIANTI\nP. IVA 08623720722\nROSSI SRL\nVia Roma 10\nData: 30/10/2026\nARTICOLO IMPORTO\nInstallazione impianto elettrico\nTotale imponibile: 1.000,00 €`;
+  const result = parseQuoteText(text, 'rossi.docx', { settings: { defaultVat: 10 } });
+  assert.equal(result.client, 'ROSSI SRL');
+  assert.equal(result.tax, '');
+});
