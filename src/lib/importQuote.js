@@ -179,8 +179,16 @@ function parseLayoutFields(layoutLines, all, db, fileName = '') {
   client = client.replace(/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?\s*/i, '').replace(/\s+P\s*\d{1,5}[./-]\d{2,4}\b.*$/i, '').trim();
 
   const cleanedLeft = leftMeta.filter(text => text !== client && !isHeaderCompanyLine(text) && !/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?$/i.test(text));
-  const taxLine = leftMeta.find(text => /(?:P\.?\s*IVA|codice fiscale|\bC\.?F\.?\b)/i.test(text));
-  const taxMatch = taxLine?.match(/(?:P\.?\s*IVA|codice fiscale|\bC\.?F\.?\b)\s*[:\-]?\s*([A-Z0-9]{8,16})/i);
+  // La P. IVA del fornitore spesso compare nella parte alta del PDF. Non va
+  // mai assegnata al cliente: cerchiamo il codice solo sulla riga del cliente
+  // o nelle righe successive della sua area anagrafica.
+  const clientMetaIndex = metadata.findIndex(line => {
+    const text = lineTextForRegion(line, 0, 0.58);
+    return text && (text === client || text.toLocaleLowerCase('it-IT').includes(client.toLocaleLowerCase('it-IT')) || /(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?/i.test(text));
+  });
+  const clientMetaLines = clientMetaIndex >= 0 ? metadata.slice(clientMetaIndex) : [];
+  const clientTaxLine = clientMetaLines.map(line => lineTextForRegion(line, 0, 0.58)).find(text => /(?:P\.?\s*IVA|codice fiscale|\bC\.?F\.?\b)/i.test(text));
+  const taxMatch = clientTaxLine?.match(/(?:P\.?\s*IVA|codice fiscale|\bC\.?F\.?\b)\s*[:\-]?\s*([A-Z0-9]{8,16})/i);
   const tax = taxMatch?.[1] || '';
   const labeledAddress = labelledValue(metadata, /^(?:indirizzo(?:\s+cliente)?|sede(?:\s+(?:legale|operativa))?|residenza)\s*[:\-]\s*(.+)$/i);
   const labeledPlace = labelledValue(metadata, /^(?:localit[aà]|citt[aà]|luogo)\s*[:\-]\s*(.+)$/i);
