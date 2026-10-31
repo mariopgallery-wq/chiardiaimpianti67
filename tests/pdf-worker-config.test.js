@@ -148,3 +148,27 @@ test('ARTICOLO remains left aligned when the IMPORTO column is absent', async ()
   assert.doesNotMatch(css, /\.quote-table-header span:last-child\s*\{\s*text-align:\s*right/);
   assert.match(css, /\.quote-table-header\.has-visible-amount > span:last-child/);
 });
+
+test('deploy build emits an auto-updating service worker and registers it for the GitHub Pages base path', async () => {
+  const vite = await read('../vite.config.js');
+  const main = await read('../src/main.jsx');
+  assert.match(vite, /emitFile\(\{ type: 'asset', fileName: 'sw\.js'/);
+  assert.match(vite, /assets\.map\(file => `\.\/\$\{file\}`\)/);
+  assert.match(vite, /self\.skipWaiting\(\)/);
+  assert.match(vite, /self\.clients\.claim\(\)/);
+  assert.match(main, /navigator\.serviceWorker\.register\(`\$\{import\.meta\.env\.BASE_URL\}sw\.js`/);
+  assert.match(main, /registration\.update\(\)/);
+  assert.match(main, /window\.addEventListener\('online', checkForAppUpdate\)/);
+  assert.match(main, /visibilitychange/);
+  assert.match(main, /window\.location\.reload\(\)/);
+});
+
+test('new quote template does not prefill sample title, intro or payment examples', async () => {
+  const domain = await read('../src/lib/domain.js');
+  const app = await read('../src/App.jsx');
+  assert.match(domain, /title: ''/);
+  assert.match(domain, /subtitle: '', intro: ''/);
+  assert.match(domain, /payment: ''/);
+  assert.doesNotMatch(app, /title: parsed\.title \|\| 'Preventivo per fornitura e posa in opera'/);
+  assert.doesNotMatch(app, /payment: initial\.payment \|\| '70% a conferma lavoro/);
+});
