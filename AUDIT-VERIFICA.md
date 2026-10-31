@@ -1,3 +1,4 @@
+[AUDIT-VERIFICA.md](https://github.com/user-attachments/files/34206343/AUDIT-VERIFICA.md)
 # Verifica tecnica del pacchetto unificato
 
 Data: 2026-10-30
@@ -29,3 +30,12 @@ La funzione del selettore è presente per tutti gli account. Il contenuto mostra
 Estrarre lo ZIP e caricare i contenuti della cartella `chiardiaimpianti67-main/` nella radice del repository, mantenendo tutti i percorsi, inclusa `.github/workflows/deploy.yml`. Il workflow è configurato intenzionalmente senza trigger `push`: i commit e i caricamenti manuali dei singoli file non avviano build. Dopo aver terminato tutti gli aggiornamenti, avviare una sola volta **Actions → Deploy Preventivi Pro to GitHub Pages → Run workflow** sul branch `main`.
 
 Non eseguire `SUPABASE_SETUP.sql` se il workspace Supabase è già configurato. Il file è incluso come parte del progetto originale; non è stata richiesta alcuna modifica allo schema o ai dati.
+
+
+## Correzioni importazione e aggiornamento PWA (31/10/2026)
+
+- Il parser PDF usa la posizione della ragione sociale cliente per cercare il codice fiscale/P. IVA soltanto nella relativa area anagrafica; il codice del fornitore sopra il cliente non viene copiato.
+- L'importazione conserva i dati fiscali già associati al cliente soltanto in caso di corrispondenza esatta del nome; un import non può trasferire la P. IVA di un'altra anagrafica.
+- Aggiunti test di regressione per PDF con P. IVA fornitore e cliente e per documenti senza P. IVA cliente.
+- Vite genera `sw.js` con precache degli asset hashati. Le installazioni PWA verificano la versione al successivo avvio online e si aggiornano/ricaricano senza reinstallazione.
+- Il modello nuovo non precompila più titolo, testo introduttivo o termini d'esempio.
