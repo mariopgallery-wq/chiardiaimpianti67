@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS = {
   phone: '3395046509',
   email: 'filippochiaradia@hotmail.it',
   defaultVat: 10,
-  payment: '70% a conferma lavoro\n30% a completamento',
+  payment: '',
   logoData: '',
 };
 
@@ -33,6 +33,7 @@ export function todayISO() {
 export function normalizeDb(value) {
   const d = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const settings = { ...DEFAULT_SETTINGS, categoryTemplates: {}, ...(d.settings && typeof d.settings === 'object' && !Array.isArray(d.settings) ? d.settings : {}) };
+  if (String(settings.payment || '').trim() === '70% a conferma lavoro\n30% a completamento') settings.payment = '';
   if (!settings.categoryTemplates || typeof settings.categoryTemplates !== 'object' || Array.isArray(settings.categoryTemplates)) settings.categoryTemplates = {};
   const quotes = Array.isArray(d.quotes) ? d.quotes.filter(q => q && typeof q === 'object' && !Array.isArray(q)).map((q, index) => {
     const net = Math.max(0, Number(q.net) || 0);
@@ -46,8 +47,8 @@ export function normalizeDb(value) {
       status: String(q.status || 'Bozza'), client: String(q.client || ''),
       address: String(q.address || ''), tax: String(q.tax || ''), place: String(q.place || ''),
       phone: String(q.phone || ''), email: String(q.email || ''), pec: String(q.pec || ''),
-      title: String(q.title ?? 'Preventivo per fornitura e posa in opera di'),
-      subtitle: String(q.subtitle || ''), intro: String(q.intro || ''), closing: String(q.closing || ''),
+      title: ['Preventivo per fornitura e posa in opera di', 'Preventivo per fornitura e posa in opera'].includes(String(q.title || '').trim()) ? '' : String(q.title || ''),
+      subtitle: String(q.subtitle || ''), intro: String(q.intro || '').trim() === 'Si precisa quanto segue:' ? '' : String(q.intro || ''), closing: String(q.closing || ''),
       payment: String(q.payment ?? settings.payment ?? DEFAULT_SETTINGS.payment),
       lines: Array.isArray(q.lines) ? q.lines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
         ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''), showPrice: line.showPrice === true,
@@ -81,10 +82,10 @@ export function newDraft(db = defaultDb()) {
   const settings = db?.settings || DEFAULT_SETTINGS;
   return {
     id: null, number: quoteNumber(db?.quotes), date: todayISO(), category: CATEGORIES[0],
-    status: 'Bozza', payment: settings.payment || DEFAULT_SETTINGS.payment,
+    status: 'Bozza', payment: settings.payment || '',
     client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
-    title: 'Preventivo per fornitura e posa in opera di',
-    subtitle: '', intro: 'Si precisa quanto segue:',
+    title: '',
+    subtitle: '', intro: '',
     lines: [{ id: `l${Date.now()}`, desc: '', internalPrice: null, showPrice: false }],
     closing: '', net: 0, vatRate: Number(settings.defaultVat ?? DEFAULT_SETTINGS.defaultVat),
   };
