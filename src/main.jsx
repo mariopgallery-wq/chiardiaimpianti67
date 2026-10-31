@@ -25,3 +25,27 @@ createRoot(rootElement).render(
     <AppErrorBoundary><App /></AppErrorBoundary>
   </React.StrictMode>
 );
+
+
+// Aggiorna automaticamente le installazioni PWA dopo ogni deploy.
+// Il browser controlla il service worker quando l'app viene aperta online;
+// se trova una nuova versione, la attiva e ricarica la pagina una sola volta.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloadingForUpdate = false;
+  let appServiceWorkerRegistration = null;
+  const checkForAppUpdate = () => appServiceWorkerRegistration?.update().catch(error => console.warn('Controllo aggiornamenti non riuscito:', error));
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloadingForUpdate) {
+      reloadingForUpdate = true;
+      window.location.reload();
+    }
+  });
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
+      .then(registration => { appServiceWorkerRegistration = registration; return registration.update(); })
+      .catch(error => console.warn('Aggiornamento automatico non disponibile:', error));
+  }, { once: true });
+  window.addEventListener('online', checkForAppUpdate);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForAppUpdate(); });
+}
