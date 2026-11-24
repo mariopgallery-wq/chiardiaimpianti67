@@ -91,7 +91,7 @@ test('normalization preserves per-activity price visibility and keeps the quote 
     quotes: [{
       number: 'P 08.26', client: 'Mario Rossi', net: 100, vatRate: 10,
       lines: [
-        { id: 'line-visible', desc: 'Installazione quadro', internalPrice: 23.5, showPrice: true },
+        { id: 'line-visible', desc: 'Installazione quadro', quantity: '3', internalPrice: 23.5, showPrice: true },
         { id: 'line-hidden', desc: 'Verifica impianto', internalPrice: 12, showPrice: false },
         { id: 'line-legacy', desc: 'Sostituzione presa', internalPrice: 8 },
       ],
@@ -99,9 +99,12 @@ test('normalization preserves per-activity price visibility and keeps the quote 
   });
   const [visible, hidden, legacy] = db.quotes[0].lines;
   assert.equal(visible.showPrice, true);
+  assert.equal(visible.quantity, '3', 'quantity values survive database normalization');
+  assert.equal(hidden.quantity, '', 'older quote rows receive an empty quantity by default');
   assert.equal(hidden.showPrice, false);
   assert.equal(legacy.showPrice, false, 'old records without the setting default to hidden');
   assert.equal(calcTotal(db.quotes[0]).total, 110, 'per-line prices do not change the quote grand total');
+  assert.equal(newDraft(db).lines[0].quantity, '', 'new quote rows start without a quantity');
 });
 
 test('normalization preserves deleted items and confirmed category templates without schema changes', () => {
@@ -158,15 +161,16 @@ test('quote editor exposes three distinct optional customer contact fields', asy
   assert.match(contacts, /facoltativo/);
 });
 
-test('each non-empty activity has an explicit bullet marker in preview and print, including flex list rows', async () => {
+test('each non-empty activity is rendered in the quote description table with safe page breaks', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
-  assert.match(app, /<ul className="quote-bullets">[\s\S]*?className="quote-bullet-marker"/);
-  assert.match(app, /className="quote-bullet-marker"[^>]*>•<\/span>/);
-  assert.match(css, /\.quote-bullets li\s*\{[^}]*display:flex/s);
-  assert.match(css, /\.quote-bullet-marker\s*\{[^}]*display:\s*inline-block/s);
+  assert.match(app, /<table className=\{`quote-work-table/);
+  assert.match(app, /<th scope="col">Descrizione<\/th>/);
+  assert.match(app, /<td className="quote-work-description">\{line\.desc\}<\/td>/);
+  assert.match(css, /\.quote-work-table tbody tr\s*\{[^}]*break-inside:\s*avoid/s);
   const printStyles = css.slice(css.lastIndexOf('@media print'));
-  assert.match(printStyles, /\.quote-bullet-marker/);
+  assert.match(printStyles, /\.quote-work-table tbody tr\s*\{[^}]*page-break-inside:\s*avoid/s);
+  assert.match(printStyles, /\.quote-work-table thead\s*\{[^}]*display:\s*table-header-group/s);
 });
 
 test('editor provides a per-activity eye control that toggles printed price visibility', async () => {
@@ -254,8 +258,8 @@ test('starting a second quote or duplicate from another section asks before repl
 
 test('print header shows IMPORTO only when at least one line price is enabled and valid', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
-  assert.match(app, /const hasVisibleLinePrice = \(draft\.lines \|\| \[\]\)\.some/);
+  assert.match(app, /const hasVisibleLinePrice = visibleLines\.some/);
   assert.match(app, /line\.showPrice === true && value !== null && value !== '' && Number\.isFinite\(Number\(value\)\)/);
-  assert.match(app, /\{hasVisibleLinePrice && <span>IMPORTO<\/span>\}/);
-  assert.match(app, /hasVisibleLinePrice \? ' has-visible-amount' : ' no-visible-amount'/);
+  assert.match(app, /\{hasVisibleLinePrice && <th scope="col" className="quote-price-heading">Prezzo<\/th>\}/);
+  assert.match(app, /hasVisibleLinePrice && <td className="quote-work-price">/);
 });
