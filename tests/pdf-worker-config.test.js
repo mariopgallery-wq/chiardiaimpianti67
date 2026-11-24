@@ -13,6 +13,17 @@ test('PDF.js uses the bundled ES module worker directly and follows the configur
   assert.ok(vite.includes("base: './'") || vite.includes('base: "./"'));
 });
 
+test('saving an imported quote persists the recognized quantity instead of dropping it', async () => {
+  const app = await read('../src/App.jsx');
+  assert.match(app, /quantity:\s*String\(l\.quantity\s*\?\?\s*''\)/);
+});
+
+test('category templates and the import fallback create lines with an empty quantity field', async () => {
+  const app = await read('../src/App.jsx');
+  assert.match(app, /desc:\s*String\(desc\),\s*quantity:\s*'',\s*internalPrice:\s*null/);
+  assert.match(app, /desc:\s*'Verificare e completare le descrizioni importate',\s*quantity:\s*'',\s*internalPrice:\s*null/);
+});
+
 test('scanned PDFs use full-page OCR segmentation for multi-column quote headers', async () => {
   const app = await read('../src/App.jsx');
   assert.match(app, /worker\.setParameters\(\{[^}]*preserve_interword_spaces:\s*'1'[^}]*tessedit_pageseg_mode:\s*'3'/);
