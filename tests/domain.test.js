@@ -16,6 +16,11 @@ test('default workspace contains all six sectors and company settings', () => {
   assert.equal(db.settings.defaultVat, 10);
 });
 
+test('new draft starts with an empty optional quantity field', () => {
+  const draft = newDraft(defaultDb());
+  assert.equal(draft.lines[0].quantity, '');
+});
+
 test('new quote inherits the configured VAT and payment terms', () => {
   const db = defaultDb();
   db.settings.defaultVat = 22;
@@ -84,6 +89,17 @@ test('normalization preserves editor-only line costs without adding them to the 
   });
   assert.equal(db.quotes[0].lines[0].internalPrice, 23.5);
   assert.equal(calcTotal(db.quotes[0]).total, 110);
+});
+
+test('normalization keeps zero quantity as text and converts missing quantities to empty text', () => {
+  const db = normalizeDb({
+    quotes: [{ number: 'P 08.26', client: 'Mario Rossi', lines: [
+      { id: 'line-zero', desc: 'Presa', quantity: 0 },
+      { id: 'line-null', desc: 'Plafoniera', quantity: null },
+      { id: 'line-missing', desc: 'Sensore' },
+    ] }],
+  });
+  assert.deepEqual(db.quotes[0].lines.map(line => line.quantity), ['0', '', '']);
 });
 
 test('normalization preserves per-activity price visibility and keeps the quote total independent', () => {
