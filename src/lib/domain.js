@@ -51,7 +51,7 @@ export function normalizeDb(value) {
       subtitle: String(q.subtitle || ''), intro: String(q.intro || '').trim() === 'Si precisa quanto segue:' ? '' : String(q.intro || ''), closing: String(q.closing || ''),
       payment: String(q.payment ?? settings.payment ?? DEFAULT_SETTINGS.payment),
       lines: Array.isArray(q.lines) ? q.lines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
-        ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''), showPrice: line.showPrice === true,
+        ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''), quantity: String(line.quantity ?? ''), showPrice: line.showPrice === true,
       })) : [],
       net, vatRate,
       vat: Number.isFinite(Number(q.vat)) && q.vat !== undefined ? Number(q.vat) : vat,
@@ -86,7 +86,7 @@ export function newDraft(db = defaultDb()) {
     client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
     title: '',
     subtitle: '', intro: '',
-    lines: [{ id: `l${Date.now()}`, desc: '', internalPrice: null, showPrice: false }],
+    lines: [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }],
     closing: '', net: 0, vatRate: Number(settings.defaultVat ?? DEFAULT_SETTINGS.defaultVat),
   };
 }
