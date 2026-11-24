@@ -594,3 +594,120 @@ img { max-width:100%; }
 .revision-history-card { margin:0 0 16px; animation:revision-panel-in .14s ease-out; }
 @media(max-width:640px) { .editor-revision-toolbar { align-items:flex-start; flex-direction:column; gap:6px; margin-top:-5px; } .editor-revision-toolbar .revision-toggle { max-width:100%; white-space:normal; text-align:left; } }
 @keyframes revision-panel-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+
+/* Nuovo modello Preventivi Pro: fascia lavori + tabella con colonne condizionali. */
+.quote-document {
+  display: block;
+  min-height: 780px;
+  padding: 35px 37px 29px;
+  box-sizing: border-box;
+  color: #20232a;
+}
+.quote-doc-header { break-inside: avoid; page-break-inside: avoid; }
+.quote-recipient-meta { break-inside: avoid; page-break-inside: avoid; }
+.quote-meta-heading { color: #20232a !important; font-size: 10px !important; font-weight: 800 !important; letter-spacing: .25px; text-transform: uppercase; }
+.quote-recipient { gap: 2px !important; }
+.quote-recipient > .quote-meta-heading { margin-bottom: 1px; }
+.quote-reference { gap: 5px !important; width: 48% !important; }
+.quote-reference > div { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) !important; align-items: center; gap: 10px !important; }
+.quote-reference > div > .quote-meta-heading { text-align: left !important; }
+.quote-reference > div > strong { text-align: right !important; justify-self: stretch !important; }
+.quote-reference-number { grid-template-columns: minmax(0,1fr) minmax(0,1fr) !important; }
+.quote-number { text-align: right; font-size: 20px; }
+.quote-work-band { margin: 12px 0 10px; padding: 9px 13px; min-height: 31px; box-sizing: border-box; background: #19286f; color: #fff; font-size: 11px; line-height: 1.2; font-weight: 800; break-inside: avoid; page-break-inside: avoid; }
+.quote-description-body { display: block !important; min-width: 0; padding: 0 7px; font-size: 11px; line-height: 1.35; overflow: visible; }
+.quote-description-body > :not(.quote-bullets) { padding: 0 !important; max-width: none; }
+.quote-title-text { margin: 0 0 7px !important; font-size: 14px !important; line-height: 1.35 !important; font-weight: 800 !important; }
+.quote-subtitle-text { margin: 0 0 5px !important; font-size: 12px !important; line-height: 1.35 !important; }
+.quote-intro { margin: 3px 0 12px !important; font-size: 10.5px !important; line-height: 1.36 !important; color: #20232a !important; white-space: pre-wrap; }
+.quote-work-table { width: 100%; margin: 0; border: 0; border-collapse: collapse; border-spacing: 0; table-layout: fixed; font-size: 10px; line-height: 1.35; color: #20232a; }
+.quote-work-table .quote-col-description { width: auto; }
+.quote-work-table.has-quantity .quote-col-quantity { width: 19mm; }
+.quote-work-table.has-price .quote-col-price { width: 29mm; }
+.quote-work-table thead { display: table-header-group; }
+.quote-work-table thead tr { background: #19286f; color: #fff; }
+.quote-work-table th { text-align: left; padding: 8px 10px; background: #19286f; color: #fff; font-size: 10px; font-weight: 800; text-align: left; vertical-align: middle; }
+.quote-work-table th:first-child { padding-left: 10px; }
+.quote-work-table th + th { border-left: 1px solid rgba(255,255,255,.25); }
+.quote-work-table .quote-quantity-heading { text-align: center; }
+.quote-work-table .quote-price-heading { text-align: right; padding-right: 11px; }
+.quote-work-table tbody tr { break-inside: avoid-page; page-break-inside: avoid; -webkit-column-break-inside: avoid; }
+.quote-work-table tbody tr:nth-child(odd) { background: #edf5f9; }
+.quote-work-table tbody tr:nth-child(even) { background: #fff; }
+.quote-work-table td { padding: 7px 10px; border-bottom: 1px solid #dce8ef; vertical-align: top; background: inherit; break-inside: avoid; page-break-inside: avoid; }
+.quote-work-description { white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; orphans: 3; widows: 3; }
+.quote-work-quantity { text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.quote-work-price { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.quote-closing { margin: 11px 7px 0 !important; color: #547bbd !important; font-size: 10.5px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; break-inside: avoid; page-break-inside: avoid; }
+.quote-doc-footer { margin-top: 25px !important; padding-top: 0 !important; break-inside: avoid; page-break-inside: avoid; }
+.quote-signatures { gap: 55px; font-weight: 500; }
+.quote-totals { width: 44%; }
+.quote-total-row { padding: 4px 0; font-size: 10px; }
+.quote-grand-total { border-top: 1px solid #19286f !important; border-bottom: 1px solid #19286f; padding: 6px 5px !important; color: #19286f; font-size: 14px !important; }
+.quote-grand-total strong { text-decoration: none !important; }
+.line-quantity-editor { display: flex; flex: 0 0 68px; flex-direction: column; gap: 4px; padding-top: 1px; font-size: 10px; font-weight: 700; }
+.line-quantity-editor input { width: 100%; min-width: 0; height: 34px; padding: 6px; border: 1px solid #dce2ed; border-radius: 7px; background: #fff; color: #182338; text-align: center; }
+.import-line-row { grid-template-columns: minmax(0,1fr) 68px 125px !important; }
+.import-line-quantity { display: block; min-width: 0; }
+.import-line-quantity span { display: block; margin-bottom: 4px; font-size: 11px; font-weight: 700; }
+.import-line-quantity input { width: 100%; min-width: 0; padding: 10px; border: 1px solid #dce2ed; border-radius: 8px; }
+
+@media (max-width: 640px) {
+  .line-quantity-editor { flex-basis: 52px; font-size: 9px; }
+  .line-quantity-editor input { height: 32px; padding: 4px; }
+  .import-line-row { grid-template-columns: minmax(0,1fr) 55px 95px !important; gap: 6px; }
+  .quote-work-table { font-size: 9px; }
+  .quote-work-table.has-quantity .quote-col-quantity { width: 14mm; }
+  .quote-work-table.has-price .quote-col-price { width: 22mm; }
+  .quote-work-table td, .quote-work-table th { padding: 6px 6px; }
+  .quote-doc-footer { gap: 8px; }
+  .quote-signatures { gap: 18px; }
+  .quote-totals { width: 52%; }
+}
+
+/* Stampa A4 multipagina: niente flex/grid come contenitore radice (Safari iOS
+   può spezzare i figli flex tra pagine). La tabella nativa gestisce le righe. */
+@page { size: A4 portrait; margin: 14mm 13mm 14mm; }
+@media print {
+  html, body, #root { width: 100% !important; height: auto !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; background: #fff !important; }
+  body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  .app-shell, .main-column, .page-content, .editor-layout, .preview-panel, .preview-paper-wrap { display: block !important; position: static !important; width: 100% !important; max-width: none !important; min-width: 0 !important; min-height: 0 !important; height: auto !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; border: 0 !important; box-shadow: none !important; background: #fff !important; }
+  .editor-layout > .edit-panel, .preview-panel > :not(.preview-paper-wrap), .sidebar, .app-header, .app-footer, .page-heading, .edit-panel, .preview-panel-top, .preview-hint, .mobile-bottom-nav, .toast-notification, .sync-warning, .mobile-menu-overlay, .editor-bottom-actions, .editor-revision-toolbar, .revision-history-card, .revision-change-list, .revision-list, .revision-change-row, .revision-row, .revision-empty, button, .button, input, select, textarea, label, .eyebrow { display: none !important; }
+  body.print-quote-only * { visibility: hidden !important; }
+  body.print-quote-only #quote-document, body.print-quote-only #quote-document * { visibility: visible !important; }
+  #quote-document, body.print-quote-only #quote-document { display: block !important; position: static !important; box-sizing: border-box !important; width: 100% !important; max-width: none !important; min-width: 0 !important; min-height: 0 !important; height: auto !important; margin: 0 !important; padding: 0 !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; background: #fff !important; color: #20232a !important; font: 9.5pt/1.28 Arial, Helvetica, sans-serif !important; overflow: visible !important; break-inside: auto !important; page-break-inside: auto !important; }
+  .quote-doc-header, .quote-recipient-meta { break-inside: avoid !important; page-break-inside: avoid !important; }
+  .quote-doc-header { display: flex !important; min-height: 34mm !important; gap: 8mm !important; }
+  .quote-company { max-width: 57% !important; font-size: 8.5pt !important; line-height: 1.08 !important; overflow-wrap: anywhere; }
+  .company-name { font-size: 16pt !important; margin-bottom: 2mm !important; }
+  .quote-logo-wrap, .quote-logo { height: 31mm !important; }
+  .quote-blue-rule { height: 1px !important; margin: 2mm 0 3mm !important; }
+  .quote-recipient-meta { display: flex !important; min-height: 24mm !important; gap: 8mm !important; font-size: 8.5pt !important; }
+  .quote-recipient { max-width: 52% !important; font-size: 8.5pt !important; line-height: 1.25 !important; }
+  .quote-reference { width: 48% !important; font-size: 8.5pt !important; line-height: 1.25 !important; }
+  .quote-number { font-size: 15pt !important; }
+  .quote-work-band { margin: 2mm 0 2.5mm !important; padding: 2.2mm 3mm !important; min-height: 8mm !important; color: #fff !important; background: #19286f !important; font-size: 9pt !important; break-inside: avoid !important; page-break-inside: avoid !important; }
+  .quote-description-body { display: block !important; padding: 0 2mm !important; font-size: 8.5pt !important; line-height: 1.3 !important; }
+  .quote-title-text { margin: 0 0 1.5mm !important; font-size: 10.5pt !important; line-height: 1.28 !important; break-after: avoid !important; page-break-after: avoid !important; }
+  .quote-subtitle-text { font-size: 9pt !important; }
+  .quote-intro { margin: 1mm 0 2.5mm !important; font-size: 8.5pt !important; line-height: 1.28 !important; }
+  .quote-work-table { display: table !important; width: 100% !important; margin: 0 !important; border-collapse: collapse !important; border-spacing: 0 !important; table-layout: fixed !important; font-size: 8pt !important; line-height: 1.25 !important; page-break-inside: auto !important; break-inside: auto !important; }
+  .quote-work-table thead { display: table-header-group !important; }
+  .quote-work-table tbody { display: table-row-group !important; }
+  .quote-work-table thead tr { background: #19286f !important; }
+  .quote-work-table th { padding: 2mm 2.5mm !important; background: #19286f !important; color: #fff !important; font-size: 8pt !important; }
+  .quote-work-table td { padding: 1.8mm 2.5mm !important; border-bottom: .2mm solid #dce8ef !important; vertical-align: top !important; }
+  .quote-work-table tbody tr { break-inside: avoid-page !important; page-break-inside: avoid !important; -webkit-column-break-inside: avoid !important; }
+  .quote-work-table tbody tr:nth-child(odd) { background: #edf5f9 !important; }
+  .quote-work-description { white-space: pre-wrap !important; overflow-wrap: break-word !important; word-break: normal !important; orphans: 3 !important; widows: 3 !important; }
+  .quote-work-quantity { text-align: center !important; white-space: nowrap !important; }
+  .quote-work-price { text-align: right !important; white-space: nowrap !important; }
+  .quote-closing { margin: 3mm 2mm 0 !important; padding: 0 !important; color: #547bbd !important; font-size: 8.5pt !important; line-height: 1.3 !important; break-inside: avoid !important; page-break-inside: avoid !important; }
+  .quote-doc-footer { display: flex !important; align-items: flex-end !important; justify-content: space-between !important; gap: 8mm !important; margin-top: 9mm !important; padding: 0 !important; break-inside: avoid !important; page-break-inside: avoid !important; }
+  .quote-signatures { display: flex !important; width: 50% !important; gap: 22mm !important; font-size: 8.5pt !important; font-weight: 500 !important; }
+  .quote-totals { width: 43% !important; min-width: 0 !important; font-size: 8.5pt !important; }
+  .quote-total-row { display: flex !important; justify-content: space-between !important; padding: 1.5mm 0 !important; }
+  .quote-grand-total { margin-top: 1mm !important; padding: 2mm !important; border-top: .3mm solid #19286f !important; border-bottom: .3mm solid #19286f !important; color: #19286f !important; font-size: 11pt !important; }
+  a { color: inherit !important; text-decoration: none !important; }
+}
+.quote-work-table th:first-child { text-align: left; }
