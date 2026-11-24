@@ -654,7 +654,7 @@ export default function App() {
   const linesForCategory = (category) => {
     const template = db.settings?.categoryTemplates?.[category];
     if (template?.confirmed && Array.isArray(template.lines) && template.lines.some(line => String(line || '').trim())) {
-      return template.lines.filter(line => String(line || '').trim()).map((desc, index) => ({ id: `tpl-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 5)}`, desc: String(desc), internalPrice: null, showPrice: false }));
+      return template.lines.filter(line => String(line || '').trim()).map((desc, index) => ({ id: `tpl-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 5)}`, desc: String(desc), quantity: '', internalPrice: null, showPrice: false }));
     }
     return [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }];
   };
@@ -899,7 +899,7 @@ export default function App() {
     if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
     const net = Math.max(0, Number(parsed.total) || 0);
     const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), quantity: String(l.quantity ?? ''), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
-    if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate' }];
+    if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate', quantity: '', internalPrice: null, showPrice: false }];
     const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
     updateDb(previous => {
       const clients = [...previous.clients]; const ci = clients.findIndex(c => escapeName(c.name) === escapeName(quote.client));
