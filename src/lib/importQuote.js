@@ -27,7 +27,7 @@ const normalizeText = (value) => String(value || '')
 const lineText = (line) => normalizeText(typeof line === 'string' ? line : line?.text);
 // Elenco dei marcatori usati normalmente nei preventivi: trattini, pallini,
 // quadratini, simboli di spunta e numerazioni. Sono riconosciuti solo a inizio riga.
-const BULLET_PREFIX = /^(?:[-]|[•●▪▫◦‣∙·*■□✓✔☑]|\d+[.)])\s*/u;
+const BULLET_PREFIX = /^(?:[-]|[•●▪▫◦‣∙·*■□✓✔☑]|\d+[.)]|e(?=\s+[A-ZÀ-ÖØ-Þ]))\s*/u;
 const isBulletLineText = (value) => BULLET_PREFIX.test(lineText(value));
 const removeBulletPrefix = (value) => lineText(value).replace(BULLET_PREFIX, '').trim();
 const lineTextForRegion = (line, minX, maxX = 1) => {
@@ -43,7 +43,10 @@ const isPostalPlace = (value) => /^(?:\d{5}\s+)?[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'�
 const labelledValue = (lines, pattern) => lines.map(lineText).map(text => text.match(pattern)?.[1]?.trim()).find(Boolean) || '';
 const isClientMetaLabel = (value) => /^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale|indirizzo|sede|residenza|localit[aà]|luogo|data|numero|n(?:\.|°|umero)?|preventivo|offerta|termini(?: di pagamento)?|pagamento)\s*[:\-]?/i.test(value);
 const isMoneySummaryLine = (value) => /\b(?:totale\s+imponibile|imponibile|subtotale|iva\b|totale\s+(?:preventivo|documento|complessivo|da pagare)|totale\s*:|importo\s+totale|sconto|acconto\s+versato|saldo\s+finale)\b/i.test(value);
-const bodyStartPattern = /\b(?:ARTICOLO\s+IMPORTO|ARTICOLO|DESCRIZIONE\s+IMPORTO|DESCRIZIONE\s+PREZZO)\b/i;
+const bodyStartPattern = /(?:^|\b)(?:ARTICOLO\s+IMPORTO|DESCRIZIONE\s+(?:IMPORTO|PREZZO|Q\.?T[AÀ]|QUANTIT[AÀ])|DESCRIZIONE\s+E\s+QUANTIT[AÀ])(?=\s|$)/i;
+const workBandPattern = /^lavorazioni\s+previste\s*:?$/i;
+const titleStartPattern = /^(?:preventivo per|offerta per|fornitura e posa in opera di)\b/i;
+const closingStartPattern = /^(?:sono comprese nel preventivo|sono inclus[ei] nel preventivo|restano escluse|sono escluse|la ditta(?: installatrice)?\b|a fine lavori\b|installazione dell['’]impianto a regola d['’]arte|installazione dell['’]impianto a regola d’arte|certificato di conformit[aà]|dichiarazione di conformit[aà]|di\.?co\.?\b|certificazione f-gas|la presente offerta|validit[aà] del preventivo|esclusioni\s*:|condizioni di garanzia)\b/i;
 const datePattern = /(\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b)/;
 
 function parseDate(dateRaw) {
@@ -75,10 +78,12 @@ function amountAtEnd(value) {
 }
 
 function parseNumber(lines, all, fileName = '') {
-  // Il modello Chiaradia mostra il numero nella testata come “P 31.26”.
-  const exactQuoteNumber = lines.find((line) => /\bP\s*\d{1,5}[./-]\d{2,4}\b/i.test(lineText(line)));
-  const fromPosition = exactQuoteNumber && lineText(exactQuoteNumber).match(/\bP\s*\d{1,5}[./-]\d{2,4}\b/i)?.[0];
-  if (fromPosition) return fromPosition.replace(/\s+/g, ' ').trim();
+  // Il modello Chiaradia mostra il numero come “P 31.26”. L'OCR può perdere
+  // il separatore e restituire “P 31 26”: ricostruiamo comunque il formato.
+  const quoteNumberPattern = /\bP\s*(\d{1,5})\s*([./-]|\s+)\s*(\d{2,4})\b/i;
+  const exactQuoteNumber = lines.find((line) => quoteNumberPattern.test(lineText(line)));
+  const fromPosition = exactQuoteNumber && lineText(exactQuoteNumber).match(quoteNumberPattern);
+  if (fromPosition) return `P ${fromPosition[1]}${fromPosition[2].trim() || '.'}${fromPosition[3]}`;
   const labeled = all.match(/(?:preventivo|offerta)\s*(?:n(?:\.|°|umero)?\s*)?[:№#\- ]*([A-Z]?\s*\d{1,6}(?:[/.-][\w.-]+)+|[A-Z]?\s*\d{1,6})/i);
   if (labeled) return labeled[1].replace(/\s+/g, ' ').trim();
   const numbered = all.match(/(?:n(?:\.|°|umero)?\s*(?:preventivo)?\s*[:№#\- ]*)([A-Z]?\s*\d{1,6}(?:[/.-][\w.-]+)+)/i);
@@ -91,7 +96,20 @@ function parseNumber(lines, all, fileName = '') {
 }
 
 function findTableStart(lines) {
-  return lines.findIndex((line) => bodyStartPattern.test(lineText(line)) && /(?:IMPORTO|PREZZO|ARTICOLO)/i.test(lineText(line)));
+  return lines.findIndex((line) => {
+    const text = lineText(line);
+    return bodyStartPattern.test(text) && /(?:IMPORTO|PREZZO|ARTICOLO|Q\.?T[AÀ]|QUANTIT[AÀ])/i.test(text);
+  });
+}
+
+function findContentStart(lines, tableIndex = -1) {
+  const limit = tableIndex >= 0 ? tableIndex : lines.length;
+  const anchors = [];
+  for (let i = 0; i < limit; i++) {
+    const text = lineText(lines[i]);
+    if (workBandPattern.test(text) || titleStartPattern.test(text) || /^si precisa quanto segue\s*:?$/i.test(text)) anchors.push(i);
+  }
+  return anchors.length ? anchors[0] : tableIndex;
 }
 
 function findFooterStart(lines, fromIndex = 0) {
@@ -132,6 +150,7 @@ function detectPayment(lines, bodyStart) {
   const beforeBody = lines.slice(0, bodyStart < 0 ? lines.length : bodyStart);
   const result = [];
   let started = false;
+  const paymentSchedule = /\b(?:\d{1,3}\s*%\s*(?:a\s+)?(?:conferma|fine|completamento|infilaggio|ordine|consegna|lavori?)|(?:acconto|saldo)\b)/i;
   for (let i = 0; i < beforeBody.length; i++) {
     const text = lineText(beforeBody[i]);
     if (/\b(?:termini(?:\s+di\s+pagamento)?|pagamento)\s*:?/i.test(text)) {
@@ -140,10 +159,17 @@ function detectPayment(lines, bodyStart) {
       if (rest) result.push(rest);
       continue;
     }
+    // Recupero OCR: se “Termini” è stato letto male ma la riga contiene una
+    // percentuale associata a una scadenza, riconosciamo ugualmente la rata.
+    if (paymentSchedule.test(text)) {
+      started = true;
+      result.push(text.replace(/^(?:te|t[eè]|rmini|term(?:ini)?)\s*[:.]?\s*(?=\d{1,3}\s*%)/i, '').trim());
+      continue;
+    }
     if (started && /\b(?:\d{1,3}\s*%|acconto|saldo|all'ordine|alla consegna|a conferma|a completamento|fine lavori|fine lavoro|bonifico|contanti|giorni)\b/i.test(text)) result.push(text);
     else if (started && result.length && text) break;
   }
-  return result.slice(0, 5).join('\n').trim();
+  return [...new Set(result)].slice(0, 5).join('\n').trim();
 }
 
 function parseLayoutFields(layoutLines, all, db, fileName = '') {
@@ -151,9 +177,12 @@ function parseLayoutFields(layoutLines, all, db, fileName = '') {
   const firstPage = sorted.filter(line => Number(line.page || 1) === 1);
   const tableIndex = findTableStart(firstPage);
   const tableLine = tableIndex >= 0 ? firstPage[tableIndex] : null;
-  const fallbackBodyIndex = tableIndex < 0 ? firstPage.findIndex(line => isBulletLineText(line) || /^(?:preventivo per|offerta per|si precisa quanto segue|fornitura e posa|realizzazione di|installazione di|il preventivo include)/i.test(lineText(line))) : -1;
-  const tableY = Number(tableLine?.yNorm ?? (fallbackBodyIndex >= 0 ? firstPage[fallbackBodyIndex]?.yNorm : 0.34));
-  const beforeTable = tableIndex >= 0 ? firstPage.slice(0, tableIndex) : firstPage.filter(line => Number(line.yNorm ?? line.y ?? 0) < tableY);
+  const contentStartIndex = findContentStart(firstPage, tableIndex);
+  const fallbackBodyIndex = contentStartIndex < 0 ? firstPage.findIndex(line => isBulletLineText(line) || /^(?:preventivo per|offerta per|si precisa quanto segue|fornitura e posa|realizzazione di|installazione di|il preventivo include)/i.test(lineText(line))) : contentStartIndex;
+  const bodyStartIndex = fallbackBodyIndex >= 0 ? fallbackBodyIndex : tableIndex;
+  const bodyStartLine = bodyStartIndex >= 0 ? firstPage[bodyStartIndex] : tableLine;
+  const tableY = Number(bodyStartLine?.yNorm ?? (fallbackBodyIndex >= 0 ? firstPage[fallbackBodyIndex]?.yNorm : 0.34));
+  const beforeTable = bodyStartIndex >= 0 ? firstPage.slice(0, bodyStartIndex) : firstPage.filter(line => Number(line.yNorm ?? line.y ?? 0) < tableY);
   const num = parseNumber(beforeTable.filter(line => Number(line.x ?? line.xNorm ?? 0) > 0.42), beforeTable.map(line => lineTextForRegion(line, 0.42, 1)).join('\n')) || parseNumber(beforeTable, all) || parseNumber([], '', fileName);
   const numberLine = beforeTable.find(line => num && lineText(line).toLocaleLowerCase('it-IT').includes(num.toLocaleLowerCase('it-IT')));
   const referenceY = Number(numberLine?.yNorm ?? numberLine?.y ?? (tableY - 0.09));
@@ -176,7 +205,7 @@ function parseLayoutFields(layoutLines, all, db, fileName = '') {
       !/\b(?:totale|iva|imponibile|pagamento|termini)\b/i.test(text));
     client = candidates[0] || '';
   }
-  client = client.replace(/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?\s*/i, '').replace(/\s+P\s*\d{1,5}[./-]\d{2,4}\b.*$/i, '').trim();
+  client = client.replace(/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?\s*/i, '').replace(/\s+P\s*\d{1,5}(?:[./-]\s*|\s+)\d{2,4}\b.*$/i, '').trim();
 
   const cleanedLeft = leftMeta.filter(text => text !== client && !isHeaderCompanyLine(text) && !/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?$/i.test(text));
   // La P. IVA del fornitore spesso compare nella parte alta del PDF. Non va
@@ -209,36 +238,68 @@ function parseLayoutFields(layoutLines, all, db, fileName = '') {
   const taxRate = summary.vatRate;
   const body = [];
   let started = false;
-  for (const line of sorted) {
+  const columnHeaderIndex = sorted.findIndex((line, index) => index >= Math.max(0, tableIndex) &&
+    /(?:^|\b)(?:q\.?\s*t[aà]|quantit[aà]|prezzo|importo)(?=\s|$)/i.test(lineText(line)));
+  const columnHeader = columnHeaderIndex >= 0 ? sorted[columnHeaderIndex] : null;
+  const quantityColumnX = columnHeader?.segments?.find(segment => /^(?:q\.?\s*t[aà]|quantit[aà])\.?$/i.test(normalizeText(segment.text)))?.x;
+  const priceColumnX = columnHeader?.segments?.find(segment => /^(?:prezzo|importo)$/i.test(normalizeText(segment.text)))?.x;
+  for (let lineIndex = 0; lineIndex < sorted.length; lineIndex++) {
+    const line = sorted[lineIndex];
     const page = Number(line.page || 1);
-    const text = lineText(line);
+    let text = lineText(line);
     const y = Number(line.yNorm ?? line.y ?? 0);
-    if (page === 1 && line === tableLine) { started = true; continue; }
-    if (page === 1 && tableIndex < 0 && line === firstPage[fallbackBodyIndex]) started = true;
+    if (page === 1 && line === bodyStartLine) started = true;
     if (page === 1 && !started) continue;
-    if (bodyStartPattern.test(text) || /^(?:articolo|importo|descrizione|prezzo)$/i.test(text)) continue;
+    if (bodyStartPattern.test(text) || /^(?:articolo|importo|descrizione|prezzo|q\.?t[aà]|quantit[aà])$/i.test(text) || workBandPattern.test(text)) continue;
     if (isMoneySummaryLine(text) && /\d[.,]\d{2}/.test(text)) break;
     if (page > 1 && (y < 0.30 || isHeaderCompanyLine(text) || /\bP\s*\d{1,5}[./-]\d{2,4}\b/i.test(text))) continue;
     if (isHeaderCompanyLine(text) || /^(?:pagina\s+\d+|www\.|https?:\/\/)/i.test(text)) continue;
+
+    // Quando il PDF contiene già la tabella Descrizione / Q.tà / Prezzo,
+    // recuperiamo i valori dalle coordinate delle celle e li consegniamo al
+    // parser comune come marcatori espliciti, senza confonderli con i numeri
+    // che appartengono alla descrizione tecnica.
+    if (columnHeaderIndex >= 0 && lineIndex > columnHeaderIndex && Array.isArray(line.segments) && line.segments.length > 1) {
+      const qX = Number(quantityColumnX);
+      const pX = Number(priceColumnX);
+      const columnXs = [qX, pX].filter(Number.isFinite);
+      const firstValueColumnX = columnXs.length ? Math.min(...columnXs) : NaN;
+      if (Number.isFinite(firstValueColumnX)) {
+        const descriptionParts = line.segments.filter(segment => Number(segment.x ?? 0) < firstValueColumnX - 0.006).map(segment => segment.text || '');
+        const quantityParts = Number.isFinite(qX) ? line.segments.filter(segment => Number(segment.x ?? 0) >= qX - 0.006 && (!Number.isFinite(pX) || Number(segment.x ?? 0) < pX - 0.006)).map(segment => segment.text || '') : [];
+        const priceParts = Number.isFinite(pX) ? line.segments.filter(segment => Number(segment.x ?? 0) >= pX - 0.006).map(segment => segment.text || '') : [];
+        const descriptionText = normalizeText(descriptionParts.join(' '));
+        const quantityText = normalizeText(quantityParts.join(' '));
+        const quantityValue = quantityText.match(/\d+(?:[,.]\d+)?/)?.[0];
+        const priceText = normalizeText(priceParts.join(' '));
+        if (descriptionText && (quantityValue || priceText)) {
+          text = [descriptionText, quantityValue ? `N ${quantityValue}` : '', priceText ? `${priceText}${/€|EUR/i.test(priceText) ? '' : ' €'}` : ''].filter(Boolean).join(' ');
+          body.push({ ...line, text });
+          continue;
+        }
+      }
+    }
     body.push(line);
   }
-  return { client, number: num, date: parseDate(dateRaw), dateRaw, tax, address, place, payment, vatRate: taxRate, bodyLines: body, tableIndex };
+  return { client, number: num, date: parseDate(dateRaw), dateRaw, tax, address, place, payment, vatRate: taxRate, bodyLines: body, tableIndex, bodyStartIndex };
 }
 
 function bodyStringsFromText(lines) {
   const tableIndex = findTableStart(lines);
-  if (tableIndex >= 0) {
-    const footerIndex = findFooterStart(lines, tableIndex + 1);
-    return lines.slice(tableIndex + 1, footerIndex).filter((line) => {
+  const contentStart = findContentStart(lines, tableIndex);
+  const start = contentStart >= 0 ? contentStart : tableIndex;
+  if (start >= 0) {
+    const footerIndex = findFooterStart(lines, start + 1);
+    return lines.slice(start, footerIndex).filter((line) => {
       const text = lineText(line);
-      return text && !bodyStartPattern.test(text) && !/^\s*(?:pagina\s+\d+|www\.|https?:\/\/)/i.test(text);
+      return text && !bodyStartPattern.test(text) && !/^(?:articolo|importo|descrizione|prezzo|q\.?t[aà]|quantit[aà])$/i.test(text) && !/^\s*(?:pagina\s+\d+|www\.|https?:\/\/)/i.test(text);
     });
   }
-  const start = lines.findIndex((line) => {
+  const fallback = lines.findIndex((line) => {
     const text = lineText(line);
-    return (isBulletLineText(text) || /^(?:preventivo per|fornitura e posa|installazione di|realizzazione di|sopralluogo e|si precisa quanto segue|il preventivo include|fornitura di n\.?\s*\d)/i.test(text)) && !isHeaderCompanyLine(text);
+    return (isBulletLineText(text) || /^(?:fornitura e posa|installazione di|realizzazione di|sopralluogo e|il preventivo include|fornitura di n\.?\s*\d)/i.test(text)) && !isHeaderCompanyLine(text);
   });
-  const from = start >= 0 ? start : 0;
+  const from = fallback >= 0 ? fallback : 0;
   const footerIndex = findFooterStart(lines, from);
   return lines.slice(from, footerIndex).filter((line) => {
     const text = lineText(line);
@@ -258,13 +319,19 @@ function joinPhysicalBodyLines(bodyLines) {
       output.push({ text, x: 0, page: 1 });
       continue;
     }
+    if (rawLine.preserveBoundary) {
+      // Nei DOCX ogni paragrafo e ogni riga di tabella sono unità esplicite:
+      // non vanno saldate solo perché le coordinate sintetiche sono ravvicinate.
+      output.push({ text, x: Number(rawLine.x ?? 0), top: Number(rawLine.top), page: Number(rawLine.page || 1), fontSize: Number(rawLine.fontSize || 10) });
+      continue;
+    }
     const previous = output[output.length - 1];
     const top = Number(rawLine.top);
     const previousTop = previous?.top;
     const gap = Number.isFinite(previousTop) ? top - previousTop : Infinity;
     const x = Number(rawLine.x ?? 0);
     const previousX = Number(previous?.x ?? x);
-    const bullet = /^(?:[-•●▪◦*]|\d+[.)])\s*/.test(text);
+    const bullet = isBulletLineText(text);
     const heading = /^(?:il\s+)?(?:preventivo include|preventivo comprende|tutto comprende|inoltre include|si precisa quanto segue|condizioni(?:\s+generali)?|note(?:\s+finali)?|fornitura di n\.?\s*\d)/i.test(text);
     const threshold = Math.max(13, Number(rawLine.fontSize || 10) * 1.65);
     const previousIsTitle = previous && /^(?:preventivo per|offerta per|fornitura e posa in opera di)\b/i.test(previous.text);
@@ -289,21 +356,21 @@ function mergeMarkedBulletRows(paragraphs) {
     if (currentBullet) output.push(currentBullet);
     currentBullet = null;
   };
-  const isBoundary = (text) => isMoneySummaryLine(text) ||
-    /^(?:altre condizioni|note finali|condizioni finali|totale lavori|riepilogo|cordiali saluti|distinti saluti|firma)\b/i.test(text) ||
-    /^(?:il\s+)?(?:preventivo include|preventivo comprende|tutto comprende|inoltre include|lavori inclusi|prestazioni incluse)\s*:?$/i.test(text);
+  const isBoundary = (text) => isMoneySummaryLine(text) || closingStartPattern.test(text.replace(/^(?:[-‐‑‒–—]|[•●▪▫◦‣∙·*■□✓✔☑])\s*/, '')) ||
+    /^(?:altre condizioni|note finali|condizioni finali|condizioni generali|esclusioni|totale lavori|riepilogo|cordiali saluti|distinti saluti|firma)\b/i.test(text) ||
+    /^(?:il\s+)?(?:preventivo\s+(?:inoltre\s+)?include|preventivo comprende|tutto comprende|inoltre include|lavori inclusi|prestazioni incluse)\s*:?$/i.test(text);
 
   for (const row of paragraphs) {
     const text = lineText(row?.text);
     if (!text) continue;
-    if (isBulletLineText(text)) {
-      flush();
-      currentBullet = { ...row, text: removeBulletPrefix(text), hasBullet: true };
-      continue;
-    }
     if (currentBullet && isBoundary(text)) {
       flush();
       output.push({ ...row, text });
+      continue;
+    }
+    if (isBulletLineText(text)) {
+      flush();
+      currentBullet = { ...row, text: removeBulletPrefix(text), hasBullet: true };
       continue;
     }
     if (currentBullet) {
@@ -321,17 +388,46 @@ function mergeMarkedBulletRows(paragraphs) {
 function extractStructuredBody(bodyLines, db) {
   const paragraphs = mergeMarkedBulletRows(joinPhysicalBodyLines(bodyLines));
   const texts = paragraphs.map(row => normalizeText(row.text)).filter(Boolean);
+  const markedBulletTexts = new Set(paragraphs.filter(row => row.hasBullet).map(row => normalizeText(row.text)));
+  const firstWorkRowIsMarked = (value) => markedBulletTexts.has(normalizeText(value));
   let title = '';
   let subtitle = '';
   let intro = '';
   let closing = '';
-  const remaining = [...texts];
+  const remaining = [...texts].filter(text => !workBandPattern.test(text));
 
-  if (remaining.length && /^(?:preventivo per|offerta per|fornitura e posa in opera di)\b/i.test(remaining[0])) {
+  if (remaining.length && titleStartPattern.test(remaining[0])) {
     title = remaining.shift();
-    if (remaining.length && !/^(?:si precisa|il preventivo include|il tutto comprende|fornitura di n\.?\s*\d|[-•●▪])\b/i.test(remaining[0]) && remaining[0].length < 180) subtitle = remaining.shift();
+    // Ricompone titoli spezzati tra più righe, anche quando l'OCR separa BTU,
+    // il secondo split e l'indirizzo dell'appartamento.
+    if (remaining.length && /\b(?:in|presso|di|a|per|con|e)$/i.test(title) &&
+      /^(?:appartamento|abitazione|locale|via|viale|piazza|corso|strada|contrada|presso)\b/i.test(remaining[0])) {
+      title = `${title} ${remaining.shift()}`.replace(/\s+/g, ' ').trim();
+    }
+    if (/\b(?:mono\s*split|dual\s*split|climatizz|condizion)/i.test(title)) {
+      while (remaining.length && /^(?:btu\b|e\s*N\s*\d|N\s*\d)/i.test(remaining[0])) {
+        title = `${title} ${remaining.shift()}`.replace(/\s+/g, ' ').trim();
+      }
+      if (remaining.length && /^(?:appartamento|abitazione|locale)\s+in\s+(?:via|viale|piazza|corso|strada|contrada)\b/i.test(remaining[0])) {
+        title = `${title} ${remaining.shift()}`.replace(/\s+/g, ' ').trim();
+      }
+    }
+    const possibleSubtitle = remaining[0] || '';
+    const startsWorkItem = /^(?:fornitura|installazione|realizzazione|sopralluogo|consegna|predisposizione|vuoto|punto|linea|quadro|distribuzione|serie civile|montaggio|posa|collaudo|collegamento|smontaggio|rimozione)\b/i.test(possibleSubtitle);
+    const looksLikeModel = /\b(?:hisense|ferroli|midea|daikin|mitsubishi|samsung|lg|panasonic|btu|kw|a\+{1,3}|modello|console|monosplit|dualsplit)\b/i.test(possibleSubtitle);
+    if (remaining.length && !startsWorkItem && !firstWorkRowIsMarked(possibleSubtitle) && !isBulletLineText(possibleSubtitle) &&
+      !/^(?:si precisa|il preventivo include|il tutto comprende|fornitura di n\.?\s*\d)\b/i.test(possibleSubtitle) &&
+      possibleSubtitle.length < 180 && (looksLikeModel || !possibleSubtitle)) subtitle = remaining.shift();
   }
-  const sectionHeading = /^(?:il\s+)?(?:preventivo include|preventivo comprende|tutto comprende|inoltre include|lavori inclusi|prestazioni incluse)\s*:?$/i;
+  const sectionHeading = /^(?:il\s+)?(?:preventivo\s+(?:inoltre\s+)?include|preventivo comprende|tutto comprende|inoltre include|lavori inclusi|prestazioni incluse)\s*:?$/i;
+  // Le righe introduttive che descrivono modalità di posa o serie/materiali
+  // (es. P35.26) sono specifiche generali, non singole lavorazioni da quotare.
+  const prefacePattern = /^(?:distribuzione e calate|serie civile e comandi|materiali? e finiture|modalit[aà] di posa|descrizione generale|premesse tecniche)\s*:/i;
+  const prefaceParts = [];
+  while (remaining.length && prefacePattern.test(removeBulletPrefix(remaining[0]))) {
+    prefaceParts.push(removeBulletPrefix(remaining.shift()));
+  }
+  if (prefaceParts.length) intro = prefaceParts.join('\n');
   const introIndex = remaining.findIndex(text => /^si precisa quanto segue\s*:?/i.test(text));
   if (introIndex >= 0) {
     const label = remaining.splice(introIndex, 1)[0].replace(/^si precisa quanto segue\s*:?/i, 'Si precisa quanto segue:').trim();
@@ -348,38 +444,62 @@ function extractStructuredBody(bodyLines, db) {
       }
       if (remaining.length && sectionHeading.test(remaining[0])) introParts.push(remaining.shift());
     }
-    intro = introParts.filter(Boolean).join('\n').trim();
+    intro = [intro, introParts.filter(Boolean).join('\n')].filter(Boolean).join('\n').trim();
   } else {
     // Se la lista ha un'intestazione esplicita ma manca “Si precisa quanto segue”,
     // la conserviamo come testo introduttivo invece di trasformarla in una lavorazione.
     const headingIndex = remaining.findIndex(text => sectionHeading.test(text));
     if (headingIndex >= 0 && headingIndex <= 1) intro = remaining.splice(headingIndex, 1)[0].trim();
   }
+  const additionalSectionHeadings = remaining.filter(text => sectionHeading.test(text));
+  if (additionalSectionHeadings.length) {
+    intro = [intro, ...additionalSectionHeadings].filter(Boolean).join('\n').trim();
+    for (let i = remaining.length - 1; i >= 0; i--) if (sectionHeading.test(remaining[i])) remaining.splice(i, 1);
+  }
 
-  // Le note finali vengono separate solo se il documento contiene un'etichetta esplicita.
-  const closingIndex = remaining.findIndex(text => /^(?:altre condizioni|note finali|condizioni finali)\s*:?/i.test(text));
-  if (closingIndex >= 0) closing = remaining.splice(closingIndex).join('\n').replace(/^(?:altre condizioni|note finali|condizioni finali)\s*:?\s*/i, '').trim();
+  // Le note finali sono separate sia da etichette esplicite sia da formule
+  // tipiche di esclusioni, collaudo e dichiarazioni di conformità.
+  const explicitClosingIndex = remaining.findIndex(text => /^(?:altre condizioni|note finali|condizioni finali|condizioni generali|esclusioni)\s*:?/i.test(text));
+  const inferredClosingIndex = remaining.findIndex((text, index) => index >= 1 && closingStartPattern.test(removeBulletPrefix(text)));
+  const closingIndexes = [explicitClosingIndex, inferredClosingIndex].filter(index => index >= 0);
+  const closingIndex = closingIndexes.length ? Math.min(...closingIndexes) : -1;
+  if (closingIndex >= 0) {
+    closing = remaining.splice(closingIndex).map((text, index) => index === 0 ? removeBulletPrefix(text) : text)
+      .filter(text => text && !/^[:;,.|–—-]+$/.test(text))
+      .join('\n')
+      .replace(/^(?:altre condizioni|note finali|condizioni finali|condizioni generali|esclusioni)\s*:?\s*/i, '').trim();
+  }
 
   const lines = [];
   for (const item of remaining) {
-    const parsed = amountAtEnd(removeBulletPrefix(item));
-    const desc = removeBulletPrefix(parsed.desc).replace(/^\d+[.)\-]\s*/, '').trim();
-    if (!desc || sectionHeading.test(desc) || isMoneySummaryLine(desc) || isHeaderCompanyLine(desc) || isClientMetaLabel(desc) || /^(?:ARTICOLO|IMPORTO|DESCRIZIONE|PREZZO)$/i.test(desc)) continue;
-    lines.push({ desc, amount: parsed.amount });
+    let rawDescription = removeBulletPrefix(item).replace(/^Vuotoe\s+pulizia\b/i, 'Vuoto e pulizia');
+    const parsed = amountAtEnd(rawDescription);
+    rawDescription = removeBulletPrefix(parsed.desc).replace(/^\d+[.)\-]\s*/, '').trim();
+    const quantityMatches = [...rawDescription.matchAll(/\b[Nn]\s*(?:\.|°|º|:)?\s*(\d+(?:[,.]\d+)?)\b/g)];
+    const quantityMatch = quantityMatches.length === 1 ? quantityMatches[0] : null;
+    const quantity = quantityMatch ? quantityMatch[1].replace(',', '.') : '';
+    if (quantityMatch) rawDescription = rawDescription.slice(0, quantityMatch.index) + ' ' + rawDescription.slice(quantityMatch.index + quantityMatch[0].length);
+    rawDescription = rawDescription.replace(/\s{2,}/g, ' ').trim();
+    const desc = rawDescription.replace(/^[-–—:;,]+\s*/, '').trim();
+    if (/^[:;,.|–—-]+$/.test(desc)) continue;
+    if (!desc || sectionHeading.test(desc) || workBandPattern.test(desc) || isMoneySummaryLine(desc) || isHeaderCompanyLine(desc) || isClientMetaLabel(desc) || /^(?:ARTICOLO|IMPORTO|DESCRIZIONE|PREZZO|Q\.?T[AÀ])$/i.test(desc)) continue;
+    lines.push({ desc, quantity: quantity || '', amount: parsed.amount });
   }
   if (!lines.length) lines.push({ desc: '', amount: null });
   return { title, subtitle, intro, closing, lines };
 }
 
 export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
-  const all = String(rawText || '').replace(/\u00a0/g, ' ').replace(/\r/g, '\n').replace(/[\t ]+/g, ' ').trim();
+  const all = String(rawText || '').replace(/\u00a0/g, ' ').replace(/[\r\f]/g, '\n').replace(/[\t ]+/g, ' ').trim();
   const lines = all.split('\n').map(normalizeText).filter(Boolean);
   const layoutLines = Array.isArray(options?.layoutLines) ? options.layoutLines : [];
   const hasLayout = layoutLines.length > 0;
   const textForFields = hasLayout ? [...layoutLines].sort((a,b) => Number(a.page||1)-Number(b.page||1) || Number(a.yNorm??a.y??0)-Number(b.yNorm??b.y??0)) : lines;
   const firstPage = hasLayout ? textForFields.filter(line => Number(line.page || 1) === 1) : lines;
   const tableIndex = findTableStart(firstPage);
-  const beforeBody = tableIndex >= 0 ? firstPage.slice(0, tableIndex) : firstPage;
+  const contentStartIndex = findContentStart(firstPage, tableIndex);
+  const fieldBoundary = contentStartIndex >= 0 ? contentStartIndex : tableIndex;
+  const beforeBody = fieldBoundary >= 0 ? firstPage.slice(0, fieldBoundary) : firstPage;
   const joinedBeforeBody = beforeBody.map(lineText).join('\n');
 
   let number = parseNumber(beforeBody, joinedBeforeBody || all, fileName);
@@ -387,7 +507,7 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
   let dateRaw = (dateSource.match(/(?:data(?:\s+di\s+emissione)?|emesso\s+il|data\s+preventivo|del)\s*[:\-]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}-\d{2}-\d{2})/i)?.[1]) ||
     (dateSource.match(datePattern)?.[1]) || '';
   const explicitClientMatch = dateSource.match(/(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?\s*([^\n]{2,100})/i);
-  let client = explicitClientMatch?.[1]?.trim() || '';
+  let client = (explicitClientMatch?.[1] || '').replace(/\s+P\s*\d{1,5}(?:[./-]\s*|\s+)\d{2,4}\b.*$/i, '').trim();
   let tax = dateSource.match(/(?:P\.?\s*IVA|codice fiscale|\bC\.?F\.?\b)\s*[:\-]?\s*([A-Z0-9]{8,16})/i)?.[1] || '';
   let address = dateSource.match(/(?:indirizzo|sede|residenza)\s*[:\-]?\s*([^\n]+)/i)?.[1]?.trim() || '';
   let place = dateSource.match(/(?:localit[aà]|citt[aà]|luogo)\s*[:\-]?\s*([^\n]+)/i)?.[1]?.trim() || '';
@@ -409,7 +529,8 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
     });
     let detectedClientIndex = -1;
     if (!client && candidates.length) {
-      client = candidates[0].text.replace(/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?\s*/i, '').trim();
+      client = candidates[0].text.replace(/^(?:cliente|spett\.?le|spettabile|destinatario|committente|ragione sociale)\s*[:\-]?\s*/i, '')
+        .replace(/\s+P\s*\d{1,5}(?:[./-]\s*|\s+)\d{2,4}\b.*$/i, '').trim();
       detectedClientIndex = candidates[0].index;
     } else if (client) {
       detectedClientIndex = headerStrings.findIndex(text => text.toLocaleLowerCase('it-IT').includes(client.toLocaleLowerCase('it-IT')));
@@ -442,7 +563,7 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
     place = layoutFields.place || '';
     payment = layoutFields.payment || payment;
     bodyLines = layoutFields.bodyLines;
-    if (layoutFields.tableIndex < 0) positionWarnings.push('Non è stato riconosciuto l’intestazione della tabella nel PDF: le descrizioni sono state individuate con un criterio testuale. Controlla la separazione delle voci.');
+    if (layoutFields.tableIndex < 0 && layoutFields.bodyStartIndex < 0) positionWarnings.push('Non è stato riconosciuto un punto di inizio affidabile del corpo del documento. Controlla la separazione delle voci.');
   } else {
     bodyLines = bodyStringsFromText(lines);
   }
@@ -463,6 +584,7 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
   const warnings = [
     formatWarning,
     options?.ocrUsed && 'Il testo è stato riconosciuto da una scansione tramite OCR: controlla con attenzione numero, data, termini, descrizioni e importi.',
+    options?.ocrWarning && String(options.ocrWarning),
     !client && 'Cliente non riconosciuto con sufficiente sicurezza: inseriscilo manualmente nell’anteprima.',
     !number && 'Numero di preventivo non riconosciuto: controlla la testata.',
     !parseDate(dateRaw) && 'Data di emissione non riconosciuta: verifica la data proposta.',
@@ -479,4 +601,4 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
 }
 
 // Esportato per test mirati senza dipendenze browser.
-export { euroNumber, parseDate };
+export { euroNumber, parseDate, extractStructuredBody };
