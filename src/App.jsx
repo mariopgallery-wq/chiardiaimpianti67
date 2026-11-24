@@ -36,7 +36,7 @@ function wordHtmlToLayout(html) {
           const x = values.length <= 1 ? 0.08 : 0.08 + (0.84 * index) / (values.length - 1);
           return { text, x, xEnd: Math.min(0.98, x + (values.length <= 1 ? 0.84 : 0.34)), fontSize: 10 };
         }).filter(segment => segment.text);
-        blocks.push({ text: values.filter(Boolean).join(' '), segments, x: Math.min(...segments.map(segment => segment.x)), fontSize: 10 });
+        blocks.push({ text: values.filter(Boolean).join(' '), segments, x: Math.min(...segments.map(segment => segment.x)), fontSize: 10, preserveBoundary: true });
       }
       continue;
     }
@@ -45,7 +45,7 @@ function wordHtmlToLayout(html) {
       : Array.from(child.querySelectorAll(':scope > p, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > ul > li, :scope > ol > li'));
     for (const node of contentNodes) {
       const text = textOf(node);
-      if (text) blocks.push({ text, segments: [{ text, x: 0.08, xEnd: 0.92, fontSize: 10 }], x: 0.08, fontSize: 10 });
+      if (text) blocks.push({ text, segments: [{ text, x: 0.08, xEnd: 0.92, fontSize: 10 }], x: 0.08, fontSize: 10, preserveBoundary: true });
     }
   }
   const lastIndex = Math.max(1, blocks.length - 1);
@@ -54,13 +54,12 @@ function wordHtmlToLayout(html) {
   }));
 }
 
-async function extractDocumentText(file) {
+async function extractDocumentText(file, onProgress = () => {}) {
   const ext = file.name.toLowerCase().split('.').pop();
   if (ext === 'pdf') {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
-    const pages = [];
-    const layoutLines = [];
+    const pageResults = [];
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
       const page = await pdf.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 1 });
@@ -126,22 +125,29 @@ async function extractDocumentText(file) {
           segments,
         };
       }).filter(row => row.text).sort((a, b) => a.top - b.top);
-      layoutLines.push(...pageLines);
-      pages.push(pageLines.map(line => line.text).join('\n'));
+      const pageText = pageLines.map(line => line.text).join('\n');
+      pageResults.push({ pageNumber, lines: pageLines, text: pageText,
+        needsOcr: !pageText.trim() || pageText.trim().length < 150 || pageLines.length < 4 });
     }
-    let text = pages.join('\n');
     let ocrUsed = false;
-    if (!text.trim() || (layoutLines.length < 10 && !/\bARTICOLO\b/i.test(text))) {
+    let ocrWarning = '';
+    const pagesNeedingOcr = pageResults.filter(page => page.needsOcr);
+    if (pagesNeedingOcr.length) {
       // PDF da scanner/fotocamera: OCR locale nel browser, con coordinate delle parole
       // per conservare la separazione sinistra/destra della testata del preventivo.
       let worker;
       try {
-        worker = await createWorker('ita+eng');
-        const ocrLayout = [];
-        const ocrPages = [];
-        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+        worker = await createWorker('ita+eng', undefined, { logger: message => {
+          if (message?.status === 'recognizing text') {
+            onProgress(`Riconoscimento OCR pagina ${message.progress != null ? Math.round(message.progress * 100) + '%' : 'in corso'}…`);
+          }
+        } });
+        await worker.setParameters({ preserve_interword_spaces: '1', tessedit_pageseg_mode: '3' });
+        for (const pageResult of pagesNeedingOcr) {
+          const pageNumber = pageResult.pageNumber;
+          onProgress(`Analisi OCR pagina ${pageNumber} di ${pdf.numPages}…`);
           const page = await pdf.getPage(pageNumber);
-          const scale = 1.8;
+          const scale = 1.65;
           const viewport = page.getViewport({ scale });
           const canvas = document.createElement('canvas');
           canvas.width = Math.ceil(viewport.width);
@@ -172,30 +178,30 @@ async function extractDocumentText(file) {
               segments,
             };
           });
-          ocrLayout.push(...lines);
-          ocrPages.push(lines.map(line => line.text).join('\n'));
+          const ocrText = lines.map(line => line.text).join('\n');
+          const originalText = pageResult.text.trim();
+          const useOcr = Boolean(ocrText.trim()) && (!originalText || originalText.length < 70 || ocrText.trim().length > originalText.length * 1.25);
+          if (useOcr) {
+            pageResult.text = ocrText;
+            pageResult.lines = lines;
+            ocrUsed = true;
+          }
           canvas.width = 1; canvas.height = 1;
-        }
-        // Se il PDF conteneva già un po' di testo, non duplicarlo: OCR è fallback solo
-        // quando il testo selezionabile manca o è solo parziale. Scegliamo la mappa OCR
-        // se ha recuperato la struttura tabellare oppure ha nettamente più testo utile.
-        const ocrText = ocrPages.join('\n');
-        const originalHasTable = /\bARTICOLO\b/i.test(text);
-        const ocrHasTable = /\bARTICOLO\b/i.test(ocrText);
-        const useOcr = !text.trim() || (ocrText.trim() && ((ocrHasTable && !originalHasTable) || ocrText.trim().length > text.trim().length * 1.4));
-        if (useOcr && ocrLayout.length) {
-          text = ocrText;
-          layoutLines.splice(0, layoutLines.length, ...ocrLayout);
-          ocrUsed = true;
+          context.clearRect(0, 0, 1, 1);
         }
       } catch (ocrError) {
-        if (!text.trim()) throw new Error(`Il PDF sembra una scansione e il riconoscimento OCR non è riuscito. ${ocrError?.message || 'Controlla la connessione e riprova.'}`);
+        ocrWarning = `OCR non completato su una o più pagine: ${ocrError?.message || 'controlla la connessione e riprova.'}`;
+        if (!pageResults.some(page => page.text.trim())) {
+          throw new Error(`Il PDF sembra una scansione e il riconoscimento OCR non è riuscito. ${ocrWarning}`);
+        }
       } finally {
         try { await worker?.terminate(); } catch {}
       }
     }
+    const text = pageResults.map(page => page.text).join('\n');
+    const layoutLines = pageResults.flatMap(page => page.lines);
     if (!text.trim()) throw new Error('Non è stato riconosciuto testo nel PDF. Prova un PDF con testo selezionabile o un DOCX.');
-    return { text, layoutLines, format: 'pdf', ocrUsed };
+    return { text, layoutLines, format: 'pdf', ocrUsed, ocrWarning };
   }
   if (ext === 'docx') {
     const arrayBuffer = await file.arrayBuffer();
@@ -385,9 +391,9 @@ function buildQuotePdfBasename(quote = {}) {
 function QuoteDocument({ draft, settings }) {
   const sums = calcTotal(draft);
   const logoSrc = settings.logoData || LOGO_URL;
-  // L'intestazione IMPORTO compare solo se almeno una voce ha un prezzo
-  // valorizzato e abilitato alla stampa.
-  const hasVisibleLinePrice = (draft.lines || []).some(line => {
+  const visibleLines = (draft.lines || []).filter(line => String(line.desc || '').trim());
+  const hasQuantity = visibleLines.some(line => String(line.quantity ?? '').trim() !== '');
+  const hasVisibleLinePrice = visibleLines.some(line => {
     const value = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
     return line.showPrice === true && value !== null && value !== '' && Number.isFinite(Number(value));
   });
@@ -399,16 +405,17 @@ function QuoteDocument({ draft, settings }) {
         <div>{settings.address || DEFAULT_SETTINGS.address}</div>
         <div>{settings.city || DEFAULT_SETTINGS.city}</div>
         <div>P. IVA {settings.vat || DEFAULT_SETTINGS.vat}</div>
-        {settings.pec && <div>PEC: {settings.pec}</div>}
         {settings.phone && <div>Cell: {settings.phone}</div>}
         {settings.email && <div>E-mail: <span className="doc-email">{settings.email}</span></div>}
+        {settings.pec && <div>PEC: {settings.pec}</div>}
       </div>
       <div className="quote-logo-wrap"><img src={logoSrc} alt="Logo Chiaradia Impianti" className="quote-logo" /></div>
     </header>
     <div className="quote-blue-rule" />
     <section className="quote-recipient-meta">
       <div className="quote-recipient">
-        <strong>{draft.client || 'NOME CLIENTE'}</strong>
+        <strong className="quote-meta-heading">CLIENTE</strong>
+        <div>{draft.client || 'NOME CLIENTE'}</div>
         {draft.address && <div>{draft.address}</div>}
         {draft.tax && <div>{draft.tax}</div>}
         {draft.place && <div>{draft.place}</div>}
@@ -417,30 +424,42 @@ function QuoteDocument({ draft, settings }) {
         {draft.pec && <div>PEC: {draft.pec}</div>}
       </div>
       <div className="quote-reference">
-        <strong className="quote-number">{draft.number || 'P —'}</strong>
-        <div><span>Data:</span><strong>{formatDate(draft.date)}</strong></div>
-        <div className="payment-line"><span>Termini:</span><strong>{(draft.payment || '').split('\n').map((part, i) => <React.Fragment key={i}>{i > 0 && <br />}{part}</React.Fragment>)}</strong></div>
+        <div className="quote-reference-number"><span className="quote-meta-heading">PREVENTIVO</span><strong className="quote-number">{draft.number || 'P —'}</strong></div>
+        <div><span className="quote-meta-heading">DATA</span><strong>{formatDate(draft.date)}</strong></div>
+        <div className="payment-line"><span className="quote-meta-heading">TERMINI DI PAGAMENTO</span><strong>{(draft.payment || '').split('\n').map((part, i) => <React.Fragment key={i}>{i > 0 && <br />}{part}</React.Fragment>)}</strong></div>
       </div>
     </section>
-    <div className={`quote-table-header${hasVisibleLinePrice ? ' has-visible-amount' : ' no-visible-amount'}`}>
-      <span>ARTICOLO</span>
-      {hasVisibleLinePrice && <span>IMPORTO</span>}
-    </div>
+    <div className="quote-work-band">Lavorazioni previste</div>
     <section className="quote-description-body">
       <div className="quote-title-text">{draft.title || 'Preventivo per fornitura e posa in opera'}</div>
       {draft.subtitle && <div className="quote-subtitle-text">{draft.subtitle}</div>}
       {draft.intro && <p className="quote-intro">{draft.intro}</p>}
-      {draft.lines?.some(line => line.desc?.trim()) && <ul className="quote-bullets">{draft.lines.filter(line => line.desc?.trim()).map(line => {
-        const linePrice = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
-        const canShowPrice = line.showPrice === true && linePrice !== null && linePrice !== '' && Number.isFinite(Number(linePrice));
-        return <li key={line.id}>
-          <span className="quote-bullet-marker" aria-hidden="true">•</span>
-          <span className="quote-bullet-text">{line.desc}</span>
-          {canShowPrice && <strong className="quote-line-amount">{money(linePrice)}</strong>}
-        </li>;
-      })}</ul>}
-      {draft.closing && <p className="quote-closing">{draft.closing}</p>}
     </section>
+    <table className={`quote-work-table${hasQuantity ? ' has-quantity' : ''}${hasVisibleLinePrice ? ' has-price' : ''}`}>
+      <colgroup>
+        <col className="quote-col-description" />
+        {hasQuantity && <col className="quote-col-quantity" />}
+        {hasVisibleLinePrice && <col className="quote-col-price" />}
+      </colgroup>
+      <thead><tr>
+        <th scope="col">Descrizione</th>
+        {hasQuantity && <th scope="col" className="quote-quantity-heading">Q.tà</th>}
+        {hasVisibleLinePrice && <th scope="col" className="quote-price-heading">Prezzo</th>}
+      </tr></thead>
+      <tbody>
+        {visibleLines.map(line => {
+          const linePrice = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
+          const canShowPrice = hasVisibleLinePrice && line.showPrice === true && linePrice !== null && linePrice !== '' && Number.isFinite(Number(linePrice));
+          return <tr key={line.id}>
+            <td className="quote-work-description">{line.desc}</td>
+            {hasQuantity && <td className="quote-work-quantity">{String(line.quantity ?? '').trim()}</td>}
+            {hasVisibleLinePrice && <td className="quote-work-price">{canShowPrice ? money(linePrice) : ''}</td>}
+          </tr>;
+        })}
+        {!visibleLines.length && <tr><td colSpan={1 + Number(hasQuantity) + Number(hasVisibleLinePrice)}>&nbsp;</td></tr>}
+      </tbody>
+    </table>
+    {draft.closing && <div className="quote-closing">{draft.closing}</div>}
     <footer className="quote-doc-footer">
       <div className="quote-signatures"><div>Data</div><div>Firma</div></div>
       <div className="quote-totals">
@@ -637,7 +656,7 @@ export default function App() {
     if (template?.confirmed && Array.isArray(template.lines) && template.lines.some(line => String(line || '').trim())) {
       return template.lines.filter(line => String(line || '').trim()).map((desc, index) => ({ id: `tpl-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 5)}`, desc: String(desc), internalPrice: null, showPrice: false }));
     }
-    return [{ id: `l${Date.now()}`, desc: '', internalPrice: null, showPrice: false }];
+    return [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }];
   };
   const createQuote = () => {
     setRevisionHistoryOpen(false);
@@ -701,7 +720,7 @@ export default function App() {
       return;
     }
     if (!confirmReplaceDraft('aprire il preventivo selezionato')) return;
-    setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '', internalPrice: null }] });
+    setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null }] });
     setView('editor'); setShowMobileMenu(false);
   };
   const updateDraft = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
@@ -776,8 +795,8 @@ export default function App() {
     lines.splice(to, 0, moved);
     return { ...previous, lines };
   });
-  const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '', internalPrice: null, showPrice: false }] }));
-  const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '', internalPrice: null, showPrice: false }] }));
+  const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }] }));
+  const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }] }));
 
   const saveQuote = () => {
     if (!draft.client.trim()) { notify('Inserisci il nome del cliente prima di salvare.'); return; }
@@ -868,7 +887,7 @@ export default function App() {
   const importQuoteFile = async (file) => {
     if (!file) return;
     setImportBusy(true);
-    try { const extracted = await extractDocumentText(file); setQuoteImport(parseQuoteText(extracted.text, file.name, db, { layoutLines: extracted.layoutLines, ocrUsed: extracted.ocrUsed })); }
+    try { const extracted = await extractDocumentText(file, message => setToast(message)); setToast(''); setQuoteImport(parseQuoteText(extracted.text, file.name, db, { layoutLines: extracted.layoutLines, ocrUsed: extracted.ocrUsed, ocrWarning: extracted.ocrWarning })); }
     catch (error) { notify(error?.message || 'Impossibile leggere il documento.'); }
     finally { setImportBusy(false); }
   };
@@ -879,7 +898,7 @@ export default function App() {
     const existingSameQuote = db.quotes.some(q => String(q.number).trim().toLowerCase() === parsed.number.trim().toLowerCase() && escapeName(q.client) === escapeName(parsed.client));
     if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
     const net = Math.max(0, Number(parsed.total) || 0);
-    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
+    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), quantity: String(l.quantity ?? ''), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
     if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate' }];
     const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
     updateDb(previous => {
@@ -1112,7 +1131,7 @@ export default function App() {
                 <div className="field"><label htmlFor="q-subtitle">Modello, quantità o specifica (facoltativo)</label><input id="q-subtitle" value={draft.subtitle} onChange={e => updateDraft('subtitle', e.target.value)} placeholder="Es. climatizzatore mono split Hisense Console 18000 BTU A++" /></div>
                 <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><textarea id="q-intro" rows={4} maxLength={4000} value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue…" /></div>
                 <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => String(line.desc || '').trim()).length} voci compilate · tieni premuto il numero per trascinare; Alt + ↑ / ↓ per spostare</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
-                <div className="description-lines">{draft.lines.map((line, index) => { const options = editorCatalogItems; return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" title="Tieni premuto il numero per trascinare; Alt + freccia su/giù per spostare" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onLostPointerCapture={finishLineDrag} onKeyDown={e => { if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); moveLineByKeyboard(line.id, -1); } else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); moveLineByKeyboard(line.id, 1); } }} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}{item.cat ? ` · ${item.cat}` : ''}</option>)}</select></div><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Prezzo €</label><div className="line-price-controls"><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /><button type="button" className={`icon-button line-price-visibility${line.showPrice === true ? ' is-visible' : ''}`} aria-label={line.showPrice === true ? `Nascondi il prezzo della voce ${index + 1} nella stampa` : `Mostra il prezzo della voce ${index + 1} nella stampa`} aria-pressed={line.showPrice === true} title={line.showPrice === true ? 'Prezzo visibile nella stampa: fai clic per nasconderlo' : 'Prezzo nascosto nella stampa: fai clic per mostrarlo'} onClick={()=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,showPrice:item.showPrice!==true}:item)}))}>{line.showPrice === true ? <Eye size={16}/> : <EyeOff size={16}/>}</button></div><span className={`line-price-state${line.showPrice === true ? ' is-visible' : ''}`}>{line.showPrice === true ? 'Visibile in stampa' : 'Nascosto in stampa'}</span></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma dei prezzi delle attività</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
+                <div className="description-lines">{draft.lines.map((line, index) => { const options = editorCatalogItems; return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" title="Tieni premuto il numero per trascinare; Alt + freccia su/giù per spostare" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onLostPointerCapture={finishLineDrag} onKeyDown={e => { if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); moveLineByKeyboard(line.id, -1); } else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); moveLineByKeyboard(line.id, 1); } }} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}{item.cat ? ` · ${item.cat}` : ''}</option>)}</select></div><label className="line-quantity-editor">Q.tà<input type="text" inputMode="decimal" aria-label={`Quantità voce ${index + 1}`} value={line.quantity ?? ''} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,quantity:e.target.value}:item)}))} placeholder="—" /></label><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Prezzo €</label><div className="line-price-controls"><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /><button type="button" className={`icon-button line-price-visibility${line.showPrice === true ? ' is-visible' : ''}`} aria-label={line.showPrice === true ? `Nascondi il prezzo della voce ${index + 1} nella stampa` : `Mostra il prezzo della voce ${index + 1} nella stampa`} aria-pressed={line.showPrice === true} title={line.showPrice === true ? 'Prezzo visibile nella stampa: fai clic per nasconderlo' : 'Prezzo nascosto nella stampa: fai clic per mostrarlo'} onClick={()=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,showPrice:item.showPrice!==true}:item)}))}>{line.showPrice === true ? <Eye size={16}/> : <EyeOff size={16}/>}</button></div><span className={`line-price-state${line.showPrice === true ? ' is-visible' : ''}`}>{line.showPrice === true ? 'Visibile in stampa' : 'Nascosto in stampa'}</span></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma dei prezzi delle attività</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
                 <div className="field closing-field"><label htmlFor="q-closing">Altre condizioni / note finali</label><textarea id="q-closing" rows={3} value={draft.closing} onChange={e => updateDraft('closing', e.target.value)} placeholder="Es. escluso opere murarie, tracce e ripristini…" /></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">04</span><div><h2>Riepilogo economico</h2><p>Un solo imponibile complessivo, IVA configurabile</p></div></div>
@@ -1253,7 +1272,7 @@ function ImportQuoteModal({ initial, onClose, onSave }) {
   const [form, setForm] = useState(() => ({ ...initial, lines: initial.lines.map(l => ({ ...l })), address: initial.address || '', tax: initial.tax || '', place: initial.place || '', title: initial.title || '', subtitle: initial.subtitle || '', intro: initial.intro || '', closing: initial.closing || '', payment: initial.payment || '', vatRate: initial.vatRate ?? 10 }));
   const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const setLine = (index, value) => setForm(prev => ({ ...prev, lines: prev.lines.map((line, i) => i === index ? { ...line, desc: value } : line) }));
-  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Località / nota anagrafica</label><input value={form.place} onChange={e=>set('place',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Modello / specifiche</label><textarea rows={2} value={form.subtitle} onChange={e=>set('subtitle',e.target.value)} /></div><div className="field"><label>Testo introduttivo</label><textarea rows={3} value={form.intro} onChange={e=>set('intro',e.target.value)} /></div><div className="field"><label>Termini di pagamento</label><textarea rows={2} value={form.payment} onChange={e=>set('payment',e.target.value)} /></div><div className="field"><label>Altre condizioni / note finali</label><textarea rows={2} value={form.closing} onChange={e=>set('closing',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-price"><span>Costo interno (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Località / nota anagrafica</label><input value={form.place} onChange={e=>set('place',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Modello / specifiche</label><textarea rows={2} value={form.subtitle} onChange={e=>set('subtitle',e.target.value)} /></div><div className="field"><label>Testo introduttivo</label><textarea rows={3} value={form.intro} onChange={e=>set('intro',e.target.value)} /></div><div className="field"><label>Termini di pagamento</label><textarea rows={2} value={form.payment} onChange={e=>set('payment',e.target.value)} /></div><div className="field"><label>Altre condizioni / note finali</label><textarea rows={2} value={form.closing} onChange={e=>set('closing',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-quantity"><span>Q.tà</span><input type="text" inputMode="decimal" value={line.quantity ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,quantity:e.target.value}:item)}))} /></label><label className="import-line-price"><span>Costo interno (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',quantity:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
 }
 function ClientEditModal({ client, onClose, onSave }) {
   const [form, setForm] = useState({ name:client.name || '', address:client.address || '', tax:client.tax || '', place:client.place || '', phone:client.phone || '', email:client.email || '', pec:client.pec || '' });
