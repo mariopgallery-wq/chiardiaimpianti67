@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseQuoteText } from '../src/lib/importQuote.js';
+import { parseQuoteText, extractStructuredBody } from '../src/lib/importQuote.js';
 
 test('recognizes client, quote number, date, category and priced work lines from text', () => {
   const text = `PREVENTIVO N. P 17/26\nData emissione: 12/03/2026\nCliente: Mario Rossi\nIndirizzo: Via Roma 12\nP. IVA: 12345678901\nSettore impianto elettrico\nFornitura e posa quadro elettrico € 1.200,00\nInstallazione prese € 350,00\nImponibile: € 1.550,00\nIVA 10%: € 155,00\nTotale documento: € 1.705,00`;
@@ -118,6 +118,127 @@ test('keeps intentionally repeated description rows instead of deduplicating the
 });
 
 
+
+test('extracts N quantity markers in compact and spaced OCR variants without stripping other technical numbers', () => {
+  const text = `Preventivo n. P 12.26
+Data: 12/06/2026
+Cliente: Mario Rossi
+ARTICOLO IMPORTO
+Fornitura presa n1
+Fornitura plafoniera N 2
+Installazione sensore N. 3
+Posa quadro N° 4
+Installazione linea 3×2,5 mm²
+Totale imponibile: 900,00 €`;
+  const result = parseQuoteText(text, 'quantita.pdf', { settings: { defaultVat: 10 } });
+  assert.deepEqual(result.lines.map(line => [line.desc, line.quantity]), [
+    ['Fornitura presa', '1'],
+    ['Fornitura plafoniera', '2'],
+    ['Installazione sensore', '3'],
+    ['Posa quadro', '4'],
+    ['Installazione linea 3×2,5 mm²', ''],
+  ]);
+});
+
+test('does not treat an ARTICOLO label inside an existing work list as a new table start', () => {
+  const text = `CHIARADIA IMPIANTI
+Impresa EdiPro s.r.l.s. P 35.26
+Data: 19/11/2026
+Preventivo per fornitura e realizzazione di impianto elettrico in appartamento in
+via Principe Amedeo 141, Bari.
+* Distribuzione e calate: dorsali a soffitto
+* Serie civile e comandi: materiale BTicino
+• Quadro elettrico generale con n. 2 differenziali e n. 5 magnetotermici
+• Punto presa bivalente n18
+      ARTICOLO
+• Punto presa Schuko n13
+Installazione dell'impianto a regola d'arte.
+Totale imponibile: 7.400,00 €`;
+  const result = parseQuoteText(text, 'P35.26.pdf', { settings: { defaultVat: 10 } });
+  assert.equal(result.client, 'Impresa EdiPro s.r.l.s.');
+  assert.match(result.intro, /Distribuzione e calate/);
+  assert.match(result.intro, /Serie civile e comandi/);
+  assert.ok(result.lines.some(line => line.desc === 'Punto presa bivalente' && line.quantity === '18'));
+  assert.ok(result.lines.some(line => line.desc === 'Punto presa Schuko' && line.quantity === '13'));
+  assert.ok(!result.lines.some(line => /^ARTICOLO$/i.test(line.desc)));
+  assert.ok(result.lines.some(line => /n\. 2 differenziali e n\. 5 magnetotermici/.test(line.desc)), 'two different component counts stay in the description rather than becoming a misleading single quantity');
+});
+
+test('repairs OCR quote numbers with a lost dot and recovers split payment terms', () => {
+  const text = `CHIARADIA IMPIANTI\nImpresa EdiPro s.r.l.s. P 36 26\nStradella del Caffè, n.24/C - Bari 70124\nData: 19/11/2026\nrmini: o\nTe 70% a conferma lavoro\n30% a fine lavori\nARTICOLO\nPreventivo per climatizzazione\nIl preventivo include:\n- Installazione climatizzatore\nTotale imponibile: 3.200,00 €`;
+  const result = parseQuoteText(text, 'scansione.pdf', { settings: { defaultVat: 10 } }, { ocrUsed: true });
+  assert.equal(result.number, 'P 36.26');
+  assert.equal(result.client, 'Impresa EdiPro s.r.l.s.');
+  assert.equal(result.date, '2026-11-19');
+  assert.equal(result.payment, '70% a conferma lavoro\n30% a fine lavori');
+});
+
+test('reads quantity values from a separate Q.tà table column using PDF layout coordinates', () => {
+  const rows = [
+    { text: 'Cliente: Mario Rossi', yNorm: 0.18, x: 0.08 },
+    { text: 'P 18.26', yNorm: 0.19, x: 0.80 },
+    { text: 'Preventivo per impianto elettrico', yNorm: 0.32, x: 0.08 },
+    { text: 'Descrizione Q.tà', yNorm: 0.45, x: 0.08, segments: [
+      { text: 'Descrizione', x: 0.08 }, { text: 'Q.tà', x: 0.84 },
+    ] },
+    { text: 'Installazione presa 4', yNorm: 0.51, x: 0.08, segments: [
+      { text: 'Installazione presa', x: 0.08 }, { text: '4', x: 0.85 },
+    ] },
+    { text: 'Installazione punto luce', yNorm: 0.57, x: 0.08, segments: [
+      { text: 'Installazione punto luce', x: 0.08 },
+    ] },
+    { text: 'Totale imponibile: 100,00 €', yNorm: 0.90, x: 0.08 },
+  ].map((line, index) => ({ ...line, page: 1, top: line.yNorm * 842, fontSize: 10,
+    segments: line.segments || [{ text: line.text, x: line.x, xEnd: line.x + 0.3, fontSize: 10 }] }));
+  const text = rows.map(line => line.text).join('\n');
+  const result = parseQuoteText(text, 'tabella-quantita.pdf', { settings: { defaultVat: 10 } }, { layoutLines: rows });
+  assert.equal(result.lines.find(line => line.desc === 'Installazione presa')?.quantity, '4');
+  assert.equal(result.lines.find(line => line.desc === 'Installazione punto luce')?.quantity, '');
+});
+
+test('keeps Word paragraph and table-row boundaries even when synthetic coordinates are close', () => {
+  const result = extractStructuredBody([
+    { text: 'Preventivo per impianto elettrico', page: 1, top: 100, x: 0.08, preserveBoundary: true },
+    { text: 'Fornitura e posa cavi', page: 1, top: 112, x: 0.08, preserveBoundary: true },
+    { text: 'Installazione quadro', page: 1, top: 124, x: 0.08, preserveBoundary: true },
+  ]);
+  assert.deepEqual(result.lines.map(line => line.desc), ['Fornitura e posa cavi', 'Installazione quadro']);
+});
+
+test('reads unit prices from a separate Prezzo column using PDF layout coordinates', () => {
+  const rows = [
+    { text: 'Cliente: Mario Rossi', yNorm: 0.18, x: 0.08 },
+    { text: 'P 19.26', yNorm: 0.19, x: 0.80 },
+    { text: 'Preventivo per impianto elettrico', yNorm: 0.32, x: 0.08 },
+    { text: 'Descrizione Prezzo', yNorm: 0.45, x: 0.08, segments: [
+      { text: 'Descrizione', x: 0.08 }, { text: 'Prezzo', x: 0.84 },
+    ] },
+    { text: 'Installazione presa 120,00', yNorm: 0.51, x: 0.08, segments: [
+      { text: 'Installazione presa', x: 0.08 }, { text: '120,00', x: 0.85 },
+    ] },
+  ].map(line => ({ ...line, page: 1, top: line.yNorm * 842, fontSize: 10,
+    segments: line.segments || [{ text: line.text, x: line.x, xEnd: line.x + 0.3, fontSize: 10 }] }));
+  const result = parseQuoteText(rows.map(line => line.text).join('\n'), 'tabella-prezzo.pdf', { settings: { defaultVat: 10 } }, { layoutLines: rows });
+  assert.equal(result.lines.find(line => line.desc === 'Installazione presa')?.amount, 120);
+});
+
+test('recognizes OCR bullet glyph substitutions and keeps wrapped continuation in one work item', () => {
+  const text = `ARTICOLO
+Preventivo per climatizzazione
+Il preventivo include:
+e Fornitura e installazione di Monosplit n.1
+tubo frigorifero e collegamento elettrico
+e Vuotoe pulizia dei circuiti frigoriferi
+Installazione dell'impianto a regola d'arte.
+Totale imponibile: 3.200,00 €`;
+  const result = parseQuoteText(text, 'ocr-scan.pdf', { settings: { defaultVat: 10 } });
+  assert.match(result.lines[0].desc, /^Fornitura e installazione di Monosplit/);
+  assert.equal(result.lines[0].quantity, '1');
+  assert.match(result.lines[0].desc, /tubo frigorifero e collegamento elettrico/);
+  assert.equal(result.lines[1].desc, 'Vuoto e pulizia dei circuiti frigoriferi');
+  assert.match(result.closing, /^Installazione dell'impianto/);
+});
+
 test('customer document renders a line price only when its per-line visibility switch is enabled', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const start = app.indexOf('function QuoteDocument');
@@ -126,7 +247,8 @@ test('customer document renders a line price only when its per-line visibility s
   const documentComponent = app.slice(start, end);
   assert.match(documentComponent, /line\.desc/);
   assert.match(documentComponent, /line\.showPrice === true/);
-  assert.match(documentComponent, /className="quote-line-amount"/);
+  assert.match(documentComponent, /className="quote-work-price"/);
+  assert.match(documentComponent, /hasVisibleLinePrice && <td className="quote-work-price">/);
   assert.match(documentComponent, /money\(linePrice\)/);
 });
 
