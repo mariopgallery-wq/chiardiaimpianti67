@@ -13,6 +13,20 @@ test('PDF.js uses the bundled ES module worker directly and follows the configur
   assert.ok(vite.includes("base: './'") || vite.includes('base: "./"'));
 });
 
+test('scanned PDFs use full-page OCR segmentation for multi-column quote headers', async () => {
+  const app = await read('../src/App.jsx');
+  assert.match(app, /worker\.setParameters\(\{[^}]*preserve_interword_spaces:\s*'1'[^}]*tessedit_pageseg_mode:\s*'3'/);
+});
+
+test('final print stylesheet uses a block document root and page-safe native table rows', async () => {
+  const css = await read('../src/styles.css');
+  const printStyles = css.slice(css.lastIndexOf('@media print'));
+  assert.match(printStyles, /#quote-document[\s\S]*?display:\s*block\s*!important/);
+  assert.match(printStyles, /\.quote-work-table thead[\s\S]*?display:\s*table-header-group\s*!important/);
+  assert.match(printStyles, /\.quote-work-table tbody tr[\s\S]*?page-break-inside:\s*avoid\s*!important/);
+  assert.match(printStyles, /\.quote-doc-footer[\s\S]*?page-break-inside:\s*avoid\s*!important/);
+});
+
 test('line dragging remembers pointer movement during the long press and starts from the number handle', async () => {
   const app = await read('../src/App.jsx');
   assert.ok(app.includes('lastClientX: event.clientX, lastClientY: event.clientY,'));
@@ -24,7 +38,7 @@ test('the customer name keeps the exact letter case entered and printed', async 
   const app = await read('../src/App.jsx');
   const css = await read('../src/styles.css');
   assert.ok(app.includes('client: draft.client.trim()'));
-  assert.ok(app.includes("<strong>{draft.client || 'NOME CLIENTE'}</strong>"));
+  assert.ok(app.includes("<div>{draft.client || 'NOME CLIENTE'}</div>"));
   assert.ok(!css.includes('.quote-recipient>strong{font-size:12px;text-transform:uppercase}'));
 });
 
@@ -84,12 +98,11 @@ test('GitHub Pages deploy runs only on manual request after all files are upload
 });
 
 
-test('quote line descriptions preserve line breaks in the printed bullet list', async () => {
+test('quote line descriptions preserve line breaks in native table cells', async () => {
   const app = await read('../src/App.jsx');
   const css = await read('../src/styles.css');
-  assert.ok(app.includes('<span className="quote-bullet-marker" aria-hidden="true">•</span>'));
-  assert.ok(app.includes('<span className="quote-bullet-text">{line.desc}</span>'));
-  assert.match(css, /\.quote-bullet-text\s*\{[^}]*white-space:\s*pre-line/s);
+  assert.ok(app.includes('<td className="quote-work-description">{line.desc}</td>'));
+  assert.match(css, /\.quote-work-description\s*\{[^}]*white-space:\s*pre-wrap/s);
   assert.ok(app.includes("desc: String(line.desc || '').trim()"));
 });
 
@@ -112,15 +125,16 @@ test('editor catalog suggestions combine catalog and saved quotes only within th
   assert.ok(app.includes('const options = editorCatalogItems'));
 });
 
-test('quote print layout reserves a fixed amount column and confines all article text to its column', async () => {
+test('quote print table reserves conditional quantity and price columns', async () => {
   const css = await read('../src/styles.css');
-  assert.match(css, /--quote-amount-column:\s*28mm/);
-  assert.match(css, /\.quote-table-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+var\(--quote-amount-column\)/s);
-  assert.match(css, /\.quote-description-body\s*\{[^}]*display:\s*grid\s*!important[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+var\(--quote-amount-column\)/s);
-  assert.match(css, /\.quote-description-body\s*>\s*:not\(\.quote-bullets\)\s*\{[^}]*grid-column:\s*1/s);
-  assert.match(css, /\.quote-bullets li\s*\{[^}]*grid-template-columns:\s*4mm\s+minmax\(0,\s*1fr\)\s+var\(--quote-amount-column\)/s);
-  assert.match(css, /\.quote-line-amount\s*\{[^}]*grid-column:\s*3/s);
-  assert.match(css, /@media print\s*\{[\s\S]*?\.quote-description-body\s*\{[^}]*display:\s*grid\s*!important/s);
+  const app = await read('../src/App.jsx');
+  assert.match(app, /const hasQuantity = visibleLines\.some/);
+  assert.match(app, /const hasVisibleLinePrice = visibleLines\.some/);
+  assert.match(app, /hasQuantity && <col className="quote-col-quantity" \/>/);
+  assert.match(app, /hasVisibleLinePrice && <col className="quote-col-price" \/>/);
+  assert.match(css, /\.quote-work-table\.has-quantity \.quote-col-quantity\s*\{[^}]*width:/s);
+  assert.match(css, /\.quote-work-table\.has-price \.quote-col-price\s*\{[^}]*width:/s);
+  assert.match(css, /\.quote-work-table\s*\{[^}]*table-layout:\s*fixed/s);
 });
 
 
@@ -142,12 +156,13 @@ test('editor always shows a dedicated history toggle and keeps the history and r
   assert.match(printStyles, /\.editor-revision-toolbar,[\s\S]*?\.revision-history-card[\s\S]*?display:\s*none\s*!important/);
 });
 
-test('ARTICOLO remains left aligned when the IMPORTO column is absent', async () => {
+test('Descrizione remains left aligned when optional columns are absent', async () => {
   const css = await read('../src/styles.css');
-  assert.match(css, /\.quote-table-header\.no-visible-amount > span:first-child \{[^}]*text-align:\s*left !important/s);
-  assert.doesNotMatch(css, /\.quote-table-header span:last-child\s*\{\s*text-align:\s*right/);
-  assert.match(css, /\.quote-table-header\.has-visible-amount > span:last-child/);
+  assert.match(css, /\.quote-work-table th:first-child\s*\{[^}]*text-align:\s*left/s);
+  assert.match(css, /\.quote-work-table \.quote-quantity-heading\s*\{[^}]*text-align:\s*center/s);
+  assert.match(css, /\.quote-work-table \.quote-price-heading\s*\{[^}]*text-align:\s*right/s);
 });
+
 
 test('deploy build emits an auto-updating service worker and registers it for the GitHub Pages base path', async () => {
   const vite = await read('../vite.config.js');
