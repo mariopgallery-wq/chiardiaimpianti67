@@ -15,6 +15,26 @@ test('recognizes client, quote number, date, category and priced work lines from
   assert.equal(result.lines.find(line => line.desc.includes('prese'))?.amount, 350);
 });
 
+test('uses the explicit system in the quote title before incidental work-item mentions', () => {
+  const text = `PREVENTIVO N. P 35.26\nData: 19/11/2026\nCliente: Impresa EdiPro s.r.l.s.\nARTICOLO IMPORTO\nPreventivo per fornitura e realizzazione di impianto elettrico in appartamento\nLinea dedicata per climatizzatori e relativi collegamenti\nTotale imponibile: 7.400,00 €`;
+  const result = parseQuoteText(text, 'P35.26.pdf', { settings: { defaultVat: 10 } });
+  assert.equal(result.category, 'Impianto elettrico');
+});
+
+test('removes a locality accidentally concatenated before a payment instalment', () => {
+  const text = `CHIARADIA IMPIANTI\nImpresa EdiPro s.r.l.s.\nP 35.26\nData: 19/11/2026\nTermini: 40% a conferma lavoro\nBari, 70124 40% a infilaggio\n20% a fine lavori\nARTICOLO IMPORTO\nInstallazione impianto elettrico\nTotale imponibile: 7.400,00 €`;
+  const result = parseQuoteText(text, 'P35.26.pdf', { settings: { defaultVat: 10 } });
+  assert.equal(result.payment, '40% a conferma lavoro\n40% a infilaggio\n20% a fine lavori');
+  assert.doesNotMatch(result.payment, /Bari|70124/);
+});
+
+test('surfaces OCR extraction warnings in the import review before saving', () => {
+  const result = parseQuoteText('Documento senza campi riconoscibili', 'scan.pdf', { settings: { defaultVat: 10 } }, {
+    ocrWarning: 'OCR non completato sulla pagina 2: riprova.',
+  });
+  assert.ok(result.warnings.includes('OCR non completato sulla pagina 2: riprova.'));
+});
+
 test('does not throw on incomplete text and asks the user to verify missing fields', () => {
   const result = parseQuoteText('Documento senza campi riconoscibili', 'scan.pdf', { settings: { defaultVat: 10 } });
   assert.equal(typeof result.client, 'string');
