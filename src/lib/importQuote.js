@@ -137,13 +137,17 @@ function parseSummary(all, lines, db) {
 }
 
 function categoryFromText(text) {
-  const value = text.toLocaleLowerCase('it-IT');
+  const value = String(text || '').toLocaleLowerCase('it-IT');
+  // Prima consideriamo il titolo/sottotitolo: una voce elettrica può citare
+  // climatizzatori senza trasformare l'intero preventivo in Climatizzazione.
+  if (/\bimpiant[oi]\s+elettric|\bimpiant[oi]\s+elettrici\b/.test(value)) return 'Impianto elettrico';
+  if (/\bimpiant[oi]\s+idraulic|\bimpiant[oi]\s+idraulici\b/.test(value)) return 'Impianto idraulico';
   if (/fotovolta/.test(value)) return 'Fotovoltaico';
   if (/videosorvegl|telecamera|videocamera/.test(value)) return 'Videosorveglianza';
   if (/antifurto|allarme/.test(value)) return 'Antifurto';
   if (/climatizz|condizion|dual console|split/.test(value)) return 'Climatizzazione';
   if (/idraulic|sanitari|rubinett/.test(value)) return 'Impianto idraulico';
-  return 'Impianto elettrico';
+  return '';
 }
 
 function detectPayment(lines, bodyStart) {
@@ -161,9 +165,14 @@ function detectPayment(lines, bodyStart) {
     }
     // Recupero OCR: se “Termini” è stato letto male ma la riga contiene una
     // percentuale associata a una scadenza, riconosciamo ugualmente la rata.
-    if (paymentSchedule.test(text)) {
+    const scheduleIndex = text.search(paymentSchedule);
+    if (scheduleIndex >= 0) {
       started = true;
-      result.push(text.replace(/^(?:te|t[eè]|rmini|term(?:ini)?)\s*[:.]?\s*(?=\d{1,3}\s*%)/i, '').trim());
+      // Nei PDF a colonne l'estrazione testuale lineare può concatenare la
+      // località di sinistra alla rata a destra (es. "Bari 70124 30%...").
+      // Conserviamo soltanto il tratto che contiene la condizione di pagamento.
+      const scheduleText = text.slice(scheduleIndex).replace(/^(?:te|t[eè]|rmini|term(?:ini)?)\s*[:.]?\s*(?=\d{1,3}\s*%)/i, '').trim();
+      if (scheduleText) result.push(scheduleText);
       continue;
     }
     if (started && /\b(?:\d{1,3}\s*%|acconto|saldo|all'ordine|alla consegna|a conferma|a completamento|fine lavori|fine lavoro|bonifico|contanti|giorni)\b/i.test(text)) result.push(text);
@@ -577,7 +586,7 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
     const sum = structured.lines.reduce((acc, line) => acc + (line.amount || 0), 0);
     total = sum > 0 ? Math.round((sum + Number.EPSILON) * 100) / 100 : 0;
   }
-  const category = categoryFromText(`${bodyText}\n${structured.title}\n${structured.subtitle}`);
+  const category = categoryFromText(`${structured.title}\n${structured.subtitle}`) || categoryFromText(bodyText) || 'Impianto elettrico';
   const vatRate = Number(summary.vatRate ?? db?.settings?.defaultVat ?? 10);
   const paymentFinal = payment || '';
   const formatWarning = /\.doc$/i.test(fileName) ? 'Il formato DOC tradizionale è binario e l’estrazione è euristica: controlla tutte le voci, l’ordine e gli importi. Se possibile, apri il file in Word e salvalo come DOCX.' : '';
