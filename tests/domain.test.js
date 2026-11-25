@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal,
-  quoteNumber, newDraft, escapeName, formatDate,
+  quoteNumber, newDraft, escapeName, formatDate, money,
 } from '../src/lib/domain.js';
 
 test('default workspace contains all six sectors and company settings', () => {
@@ -12,6 +12,7 @@ test('default workspace contains all six sectors and company settings', () => {
   assert.deepEqual(db.quotes, []);
   assert.deepEqual(db.items, []);
   assert.deepEqual(db.clients, []);
+  assert.deepEqual(db.quoteFolders, []);
   assert.equal(db.settings.name, DEFAULT_SETTINGS.name);
   assert.equal(db.settings.defaultVat, 10);
 });
@@ -30,7 +31,7 @@ test('new quote inherits the configured VAT and payment terms', () => {
   assert.equal(draft.payment, 'Bonifico bancario');
   assert.equal(draft.status, 'Bozza');
   assert.equal(draft.id, null);
-  assert.match(draft.number, /^P 01\.\d{2}$/);
+  assert.match(draft.number, /^P 1\.\d{2}$/);
 });
 
 test('VAT and grand total calculate to cents and clamp invalid values', () => {
@@ -45,10 +46,12 @@ test('VAT and grand total calculate to cents and clamp invalid values', () => {
   });
 });
 
-test('quote numbering increments the largest number in the current year only', () => {
-  const yy = String(new Date().getFullYear()).slice(-2);
-  assert.equal(quoteNumber([]), `P 01.${yy}`);
-  assert.equal(quoteNumber([{ number: `P 01.${yy}` }, { number: `P 03.${yy}` }, { number: 'P 99.99' }]), `P 04.${yy}`);
+test('quote numbering is progressive without zero padding and resets by issue year', () => {
+  assert.equal(quoteNumber([], '2026-01-02'), 'P 1.26');
+  assert.equal(quoteNumber([{ number: 'P 1.26' }, { number: 'P 3.26' }, { number: 'P 99.25' }], '2026-11-25'), 'P 4.26');
+  assert.equal(quoteNumber([{ number: 'P 01.26' }, { number: 'P35.26' }, { number: 'P 99.25' }], '2026-11-25'), 'P 36.26');
+  assert.equal(quoteNumber([{ number: 'P 999.26' }, { number: 'P 100.25' }], '2026-11-25'), 'P 1000.26');
+  assert.equal(quoteNumber([{ number: 'P 99.26' }], '2027-01-01'), 'P 1.27');
 });
 
 test('database normalization tolerates malformed or legacy records without losing valid data', () => {
@@ -78,6 +81,18 @@ test('date formatting safely handles missing and invalid dates', () => {
   assert.equal(formatDate(''), '—');
   assert.equal(formatDate('not-a-date'), 'not-a-date');
   assert.match(formatDate('2026-10-27'), /27/);
+});
+
+test('normalization preserves additional-work rows, quantities and printed-price visibility', () => {
+  const db = normalizeDb({ quotes: [{ number: 'P 38.26', client: 'Mario Rossi', extraLines: [
+    { id: 'extra-1', desc: 'Spostamento presa', quantity: '2', internalPrice: 45, showPrice: true },
+    { desc: 'Ripristino traccia', quantity: 1, amount: 30 },
+  ] }] });
+  assert.equal(db.quotes[0].extraLines.length, 2);
+  assert.deepEqual(db.quotes[0].extraLines.map(line => line.quantity), ['2', '1']);
+  assert.equal(db.quotes[0].extraLines[0].showPrice, true);
+  assert.equal(db.quotes[0].extraLines[1].showPrice, false);
+  assert.ok(db.quotes[0].extraLines[1].id);
 });
 
 test('normalization preserves editor-only line costs without adding them to the quote total', () => {
@@ -154,7 +169,7 @@ test('every quote line shows catalog and saved-quote suggestions only from the s
   assert.match(catalog, /Array\.isArray\(quote\.lines\)/);
   assert.match(catalog, /\[db\.items, db\.quotes, draft\?\.category\]/);
   const rowStart = app.indexOf('draft.lines.map((line, index)');
-  const rowEnd = app.indexOf('</div><div className="internal-cost-summary"', rowStart);
+  const rowEnd = app.indexOf('line-items-heading extra-line-items-heading', rowStart);
   assert.ok(rowStart >= 0 && rowEnd > rowStart);
   const row = app.slice(rowStart, rowEnd);
   assert.match(row, /const options = editorCatalogItems/);
@@ -180,7 +195,9 @@ test('quote editor exposes three distinct optional customer contact fields', asy
 test('each non-empty activity is rendered in the quote description table with safe page breaks', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
-  assert.match(app, /<table className=\{`quote-work-table/);
+  assert.match(app, /return <table key=\{tableKey\} className=\{`quote-work-table/);
+  assert.match(app, /renderWorkTable\(visibleLines, 'main-work-table', true\)/);
+  assert.match(app, /renderWorkTable\(visibleExtraLines, 'extra-work-table'\)/);
   assert.match(app, /<th scope="col">Descrizione<\/th>/);
   assert.match(app, /<td className="quote-work-description">\{line\.desc\}<\/td>/);
   assert.match(css, /\.quote-work-table tbody tr\s*\{[^}]*break-inside:\s*avoid/s);
@@ -192,7 +209,7 @@ test('each non-empty activity is rendered in the quote description table with sa
 test('editor provides a per-activity eye control that toggles printed price visibility', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
   const rowStart = app.indexOf('<div className="description-lines">');
-  const rowEnd = app.indexOf('</div><div className="internal-cost-summary">', rowStart);
+  const rowEnd = app.indexOf('line-items-heading extra-line-items-heading', rowStart);
   assert.ok(rowStart >= 0 && rowEnd > rowStart);
   const row = app.slice(rowStart, rowEnd);
   assert.match(row, /aria-pressed=\{line\.showPrice === true\}/);
@@ -274,8 +291,44 @@ test('starting a second quote or duplicate from another section asks before repl
 
 test('print header shows IMPORTO only when at least one line price is enabled and valid', async () => {
   const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
-  assert.match(app, /const hasVisibleLinePrice = visibleLines\.some/);
+  assert.match(app, /const hasVisiblePrice = rows\.some/);
   assert.match(app, /line\.showPrice === true && value !== null && value !== '' && Number\.isFinite\(Number\(value\)\)/);
-  assert.match(app, /\{hasVisibleLinePrice && <th scope="col" className="quote-price-heading">Prezzo<\/th>\}/);
-  assert.match(app, /hasVisibleLinePrice && <td className="quote-work-price">/);
+  assert.match(app, /\{hasVisiblePrice && <th scope="col" className="quote-price-heading">Prezzo<\/th>\}/);
+  assert.match(app, /hasVisiblePrice && <td className="quote-work-price">/);
+});
+
+test('quote folders and folder assignments survive workspace normalization', () => {
+  const db = normalizeDb({
+    quoteFolders: [{ id: 'folder-2026', name: 'Cantieri 2026', createdAt: '2026-11-20T10:00:00.000Z' }],
+    quotes: [{ id: 'q1', number: 'P 01.26', client: 'Mario Rossi', folderId: 'folder-2026', lines: [] }],
+  });
+  assert.deepEqual(db.quoteFolders, [{ id: 'folder-2026', name: 'Cantieri 2026', createdAt: '2026-11-20T10:00:00.000Z' }]);
+  assert.equal(db.quotes[0].folderId, 'folder-2026');
+  assert.equal(normalizeDb({ quotes: [{ client: 'Anna' }] }).quotes[0].folderId, '');
+});
+
+test('currency formatting places the euro symbol before the amount', () => {
+  assert.equal(money(950), '€ 950,00');
+  assert.equal(money(1159), '€ 1.159,00');
+});
+
+
+test('archive quote rows can be dragged into named folders and the unassigned area', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  assert.match(app, /draggable onDragStart=\{event => \{ setDraggingQuoteId\(q\.id\)/);
+  assert.match(app, /onDrop=\{event => handleFolderDrop\(event, folder\.id\)\}/);
+  assert.match(app, /moveQuoteToFolder\(q\.id, event\.target\.value\)/);
+  assert.match(app, /setHistoryFolderFilter\(nextFolderId \|\| NO_FOLDER\)/);
+});
+
+test('additional work rows are editable, saved, normalized and shown in the printed document table', async () => {
+  const app = await readFile(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const domain = await readFile(new URL('../src/lib/domain.js', import.meta.url), 'utf8');
+  assert.match(app, /const addExtraLine =/);
+  assert.match(app, /extraLines: \(draft\.extraLines \|\| \[\]\)\.map/);
+  assert.match(app, /Modifiche e lavorazioni aggiuntive/);
+  assert.match(app, /extra-internal-price-/);
+  assert.match(app, /renderWorkTable\(visibleExtraLines, 'extra-work-table'\)/);
+  assert.match(domain, /extraLines: Array\.isArray\(q\.extraLines\)/);
+  assert.match(domain, /extraLines: \[\]/);
 });
