@@ -139,10 +139,10 @@ test('editor catalog suggestions combine catalog and saved quotes only within th
 test('quote print table reserves conditional quantity and price columns', async () => {
   const css = await read('../src/styles.css');
   const app = await read('../src/App.jsx');
-  assert.match(app, /const hasQuantity = visibleLines\.some/);
-  assert.match(app, /const hasVisibleLinePrice = visibleLines\.some/);
+  assert.match(app, /const hasQuantity = rows\.some/);
+  assert.match(app, /const hasVisiblePrice = rows\.some/);
   assert.match(app, /hasQuantity && <col className="quote-col-quantity" \/>/);
-  assert.match(app, /hasVisibleLinePrice && <col className="quote-col-price" \/>/);
+  assert.match(app, /hasVisiblePrice && <col className="quote-col-price" \/>/);
   assert.match(css, /\.quote-work-table\.has-quantity \.quote-col-quantity\s*\{[^}]*width:/s);
   assert.match(css, /\.quote-work-table\.has-price \.quote-col-price\s*\{[^}]*width:/s);
   assert.match(css, /\.quote-work-table\s*\{[^}]*table-layout:\s*fixed/s);
