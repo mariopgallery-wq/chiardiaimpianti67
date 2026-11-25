@@ -429,6 +429,7 @@ function extractStructuredBody(bodyLines, db) {
       possibleSubtitle.length < 180 && (looksLikeModel || !possibleSubtitle)) subtitle = remaining.shift();
   }
   const sectionHeading = /^(?:il\s+)?(?:preventivo\s+(?:inoltre\s+)?include|preventivo comprende|tutto comprende|inoltre include|lavori inclusi|prestazioni incluse)\s*:?$/i;
+  const extraSectionHeading = /^(?:modifiche\s+e\s+lavorazioni\s+aggiuntive|modifiche\s+aggiuntive|lavorazioni\s+aggiuntive)\s*:?$/i;
   // Le righe introduttive che descrivono modalità di posa o serie/materiali
   // (es. P35.26) sono specifiche generali, non singole lavorazioni da quotare.
   const prefacePattern = /^(?:distribuzione e calate|serie civile e comandi|materiali? e finiture|modalit[aà] di posa|descrizione generale|premesse tecniche)\s*:/i;
@@ -466,6 +467,45 @@ function extractStructuredBody(bodyLines, db) {
     for (let i = remaining.length - 1; i >= 0; i--) if (sectionHeading.test(remaining[i])) remaining.splice(i, 1);
   }
 
+  // Se il documento contiene una sezione dedicata alle modifiche, la separiamo
+  // dalle lavorazioni previste. Il testo prima dell'intestazione della tabella (o
+  // del primo elenco puntato) resta come introduzione delle modifiche.
+  let extraIntro = '';
+  let extraLines = [];
+  let extraSectionClosing = '';
+  const extraSectionIndex = remaining.findIndex(text => extraSectionHeading.test(text));
+  if (extraSectionIndex >= 0) {
+    const extraBlock = remaining.splice(extraSectionIndex);
+    let extraBody = extraBlock.slice(1);
+    const extraTableHeadingIndex = extraBody.findIndex(text =>
+      /^(?:descrizione\s+)?(?:q\.?t[aà]|quantit[aà])(?:\s+(?:prezzo|importo))?$/i.test(text) ||
+      /^descrizione\s+(?:q\.?t[aà]\s+)?(?:prezzo|importo)$/i.test(text) ||
+      /^articolo\s+importo$/i.test(text)
+    );
+    const firstExtraBulletIndex = extraBody.findIndex(text => markedBulletTexts.has(normalizeText(text)));
+    // Nell'importazione PDF/DOCX, l'intestazione delle colonne può essere
+    // rimossa prima da bodyStringsFromText. In quel caso la prima riga con
+    // un importo riconoscibile segna l'inizio della tabella: il testo prima
+    // resta l'introduzione libera della sezione aggiuntiva.
+    const firstExtraPricedRowIndex = extraBody.findIndex(text => amountAtEnd(text).amount !== null);
+    if (extraTableHeadingIndex >= 0) {
+      extraIntro = extraBody.slice(0, extraTableHeadingIndex).join('\n').trim();
+      extraBody = extraBody.slice(extraTableHeadingIndex + 1);
+    } else if (firstExtraBulletIndex >= 0) {
+      extraIntro = extraBody.slice(0, firstExtraBulletIndex).join('\n').trim();
+      extraBody = extraBody.slice(firstExtraBulletIndex);
+    } else if (firstExtraPricedRowIndex > 0) {
+      extraIntro = extraBody.slice(0, firstExtraPricedRowIndex).join('\n').trim();
+      extraBody = extraBody.slice(firstExtraPricedRowIndex);
+    }
+    const extraClosingIndex = extraBody.findIndex((text, index) => index >= 1 && closingStartPattern.test(removeBulletPrefix(text)));
+    if (extraClosingIndex >= 0) {
+      extraSectionClosing = extraBody.slice(extraClosingIndex).join('\n').trim();
+      extraBody = extraBody.slice(0, extraClosingIndex);
+    }
+    extraLines = extraBody;
+  }
+
   // Le note finali sono separate sia da etichette esplicite sia da formule
   // tipiche di esclusioni, collaudo e dichiarazioni di conformità.
   const explicitClosingIndex = remaining.findIndex(text => /^(?:altre condizioni|note finali|condizioni finali|condizioni generali|esclusioni)\s*:?/i.test(text));
@@ -479,23 +519,29 @@ function extractStructuredBody(bodyLines, db) {
       .replace(/^(?:altre condizioni|note finali|condizioni finali|condizioni generali|esclusioni)\s*:?\s*/i, '').trim();
   }
 
-  const lines = [];
-  for (const item of remaining) {
-    let rawDescription = removeBulletPrefix(item).replace(/^Vuotoe\s+pulizia\b/i, 'Vuoto e pulizia');
-    const parsed = amountAtEnd(rawDescription);
-    rawDescription = removeBulletPrefix(parsed.desc).replace(/^\d+[.)\-]\s*/, '').trim();
-    const quantityMatches = [...rawDescription.matchAll(/\b[Nn]\s*(?:\.|°|º|:)?\s*(\d+(?:[,.]\d+)?)\b/g)];
-    const quantityMatch = quantityMatches.length === 1 ? quantityMatches[0] : null;
-    const quantity = quantityMatch ? quantityMatch[1].replace(',', '.') : '';
-    if (quantityMatch) rawDescription = rawDescription.slice(0, quantityMatch.index) + ' ' + rawDescription.slice(quantityMatch.index + quantityMatch[0].length);
-    rawDescription = rawDescription.replace(/\s{2,}/g, ' ').trim();
-    const desc = rawDescription.replace(/^[-–—:;,]+\s*/, '').trim();
-    if (/^[:;,.|–—-]+$/.test(desc)) continue;
-    if (!desc || sectionHeading.test(desc) || workBandPattern.test(desc) || isMoneySummaryLine(desc) || isHeaderCompanyLine(desc) || isClientMetaLabel(desc) || /^(?:ARTICOLO|IMPORTO|DESCRIZIONE|PREZZO|Q\.?T[AÀ])$/i.test(desc)) continue;
-    lines.push({ desc, quantity: quantity || '', amount: parsed.amount });
-  }
+  const parseWorkRows = (items) => {
+    const parsedRows = [];
+    for (const item of items) {
+      let rawDescription = removeBulletPrefix(item).replace(/^Vuotoe\s+pulizia\b/i, 'Vuoto e pulizia');
+      const parsed = amountAtEnd(rawDescription);
+      rawDescription = removeBulletPrefix(parsed.desc).replace(/^\d+[.)\-]\s*/, '').trim();
+      const quantityMatches = [...rawDescription.matchAll(/\b[Nn]\s*(?:\.|°|º|:)?\s*(\d+(?:[,.]\d+)?)\b/g)];
+      const quantityMatch = quantityMatches.length === 1 ? quantityMatches[0] : null;
+      const quantity = quantityMatch ? quantityMatch[1].replace(',', '.') : '';
+      if (quantityMatch) rawDescription = rawDescription.slice(0, quantityMatch.index) + ' ' + rawDescription.slice(quantityMatch.index + quantityMatch[0].length);
+      rawDescription = rawDescription.replace(/\s{2,}/g, ' ').trim();
+      const desc = rawDescription.replace(/^[-–—:;,]+\s*/, '').trim();
+      if (/^[:;,.|–—-]+$/.test(desc)) continue;
+      if (!desc || sectionHeading.test(desc) || extraSectionHeading.test(desc) || workBandPattern.test(desc) || isMoneySummaryLine(desc) || isHeaderCompanyLine(desc) || isClientMetaLabel(desc) || /^(?:ARTICOLO|IMPORTO|DESCRIZIONE|PREZZO|Q\.?T[AÀ])$/i.test(desc)) continue;
+      parsedRows.push({ desc, quantity: quantity || '', amount: parsed.amount });
+    }
+    return parsedRows;
+  };
+  const lines = parseWorkRows(remaining);
+  extraLines = parseWorkRows(extraLines);
+  if (!closing && extraSectionClosing) closing = extraSectionClosing.replace(/^(?:altre condizioni|note finali|condizioni finali|condizioni generali|esclusioni)\s*:?\s*/i, '').trim();
   if (!lines.length) lines.push({ desc: '', amount: null });
-  return { title, subtitle, intro, closing, lines };
+  return { title, subtitle, intro, extraIntro, closing, lines, extraLines };
 }
 
 export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
@@ -604,8 +650,8 @@ export function parseQuoteText(rawText, fileName, db = {}, options = {}) {
   return {
     fileName, rawText: all, number, date: (hasLayout ? parseLayoutFields(layoutLines, all, db, fileName).date : '') || parseDate(dateRaw) || todayISO(), dateRaw,
     client, tax, address, place, payment: paymentFinal, vatRate, category, total: Math.max(0, Number(total) || 0),
-    title: structured.title, subtitle: structured.subtitle, intro: structured.intro, closing: structured.closing,
-    lines: structured.lines, warnings,
+    title: structured.title, subtitle: structured.subtitle, intro: structured.intro, extraIntro: structured.extraIntro, closing: structured.closing,
+    lines: structured.lines, extraLines: structured.extraLines, warnings,
   };
 }
 
