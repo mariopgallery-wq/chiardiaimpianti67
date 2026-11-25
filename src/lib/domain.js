@@ -51,7 +51,8 @@ export function normalizeDb(value) {
       address: String(q.address || ''), tax: String(q.tax || ''), place: String(q.place || ''),
       phone: String(q.phone || ''), email: String(q.email || ''), pec: String(q.pec || ''),
       title: ['Preventivo per fornitura e posa in opera di', 'Preventivo per fornitura e posa in opera'].includes(String(q.title || '').trim()) ? '' : String(q.title || ''),
-      subtitle: String(q.subtitle || ''), intro: String(q.intro || '').trim() === 'Si precisa quanto segue:' ? '' : String(q.intro || ''), closing: String(q.closing || ''),
+      subtitle: String(q.subtitle || ''), intro: String(q.intro || '').trim() === 'Si precisa quanto segue:' ? '' : String(q.intro || ''),
+      extraIntro: String(q.extraIntro || ''), closing: String(q.closing || ''),
       payment: String(q.payment ?? settings.payment ?? DEFAULT_SETTINGS.payment),
       folderId: String(q.folderId || ''),
       lines: Array.isArray(q.lines) ? q.lines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
@@ -99,7 +100,7 @@ export function newDraft(db = defaultDb()) {
     status: 'Bozza', payment: settings.payment || '',
     client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
     title: '',
-    subtitle: '', intro: '',
+    subtitle: '', intro: '', extraIntro: '',
     lines: [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }],
     extraLines: [],
     closing: '', net: 0, vatRate: Number(settings.defaultVat ?? DEFAULT_SETTINGS.defaultVat),
