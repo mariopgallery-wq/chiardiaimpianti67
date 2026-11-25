@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AirVent, ArrowDownToLine, ArrowLeft, ArrowRight, BadgeCheck, BookOpen,
-  Building2, Check, CheckCircle2, CircleHelp, Cloud,
+  Building2, Check, CheckCircle2, CircleHelp, Cloud, Folder, FolderOpen, FolderPlus,
   CloudOff, Copy, Download, FilePlus2, FileText, Filter, Home, KeyRound, LogOut,
   Mail, MoreHorizontal, Pencil, Plus, Printer, RefreshCw, Search, Settings,
   ShieldCheck, Trash2, UserRound, Users, Wrench, X, Zap, Eye, EyeOff, History, ChevronDown
@@ -18,6 +18,8 @@ import { CATEGORIES, DEFAULT_SETTINGS, defaultDb, normalizeDb, calcTotal, money,
 import { parseQuoteText } from './lib/importQuote.js';
 
 const LOGO_URL = './logo-chiaradia.png';
+const ALL_FOLDERS = '__all__';
+const NO_FOLDER = '__none__';
 
 function wordHtmlToLayout(html) {
   // Mammoth preserva la gerarchia di paragrafi e tabelle DOCX, ma non le coordinate
@@ -484,10 +486,18 @@ export default function App() {
   const [syncMessage, setSyncMessage] = useState('');
   const [toast, setToast] = useState('');
   const [historySearch, setHistorySearch] = useState('');
+  const [historyCategory, setHistoryCategory] = useState('Tutti');
+  const [historyFolderFilter, setHistoryFolderFilter] = useState(ALL_FOLDERS);
+  const [historySort, setHistorySort] = useState('date-desc');
   const [revisionHistoryOpen, setRevisionHistoryOpen] = useState(false);
   const [catalogSearch, setCatalogSearch] = useState('');
   const [catalogFilter, setCatalogFilter] = useState('Tutti');
+  const [catalogSort, setCatalogSort] = useState('name-asc');
   const [clientSearch, setClientSearch] = useState('');
+  const [clientCategory, setClientCategory] = useState('Tutti');
+  const [clientSort, setClientSort] = useState('name-asc');
+  const [dashboardCategory, setDashboardCategory] = useState('Tutti');
+  const [dashboardSort, setDashboardSort] = useState('date-desc');
   const [quoteImport, setQuoteImport] = useState(null);
   const [importBusy, setImportBusy] = useState(false);
   const [editingClient, setEditingClient] = useState(null);
@@ -644,6 +654,32 @@ export default function App() {
     return normalizeDb(next);
   }), []);
 
+  const createQuoteFolder = () => {
+    const rawName = window.prompt('Nome della nuova cartella (es. 2026, Condominio Rossi, Cantieri):');
+    const name = String(rawName || '').trim();
+    if (!name) return;
+    if (db.quoteFolders.some(folder => escapeName(folder.name) === escapeName(name))) { notify('Esiste già una cartella con questo nome.'); return; }
+    const folder = { id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name, createdAt: new Date().toISOString() };
+    updateDb(previous => ({ ...previous, quoteFolders: [...(previous.quoteFolders || []), folder] }));
+    setHistoryFolderFilter(folder.id);
+    notify(`Cartella “${name}” creata.`);
+  };
+  const renameQuoteFolder = (folder) => {
+    const rawName = window.prompt('Nuovo nome della cartella:', folder.name);
+    const name = String(rawName || '').trim();
+    if (!name || name === folder.name) return;
+    if (db.quoteFolders.some(item => item.id !== folder.id && escapeName(item.name) === escapeName(name))) { notify('Esiste già una cartella con questo nome.'); return; }
+    updateDb(previous => ({ ...previous, quoteFolders: (previous.quoteFolders || []).map(item => item.id === folder.id ? { ...item, name } : item) }));
+    notify('Nome della cartella aggiornato.');
+  };
+  const deleteQuoteFolder = (folder) => {
+    const count = db.quotes.filter(quote => quote.folderId === folder.id).length;
+    if (!window.confirm(`Eliminare la cartella “${folder.name}”? I ${count} preventivi contenuti resteranno nell’archivio, senza cartella.`)) return;
+    updateDb(previous => ({ ...previous, quoteFolders: (previous.quoteFolders || []).filter(item => item.id !== folder.id), quotes: previous.quotes.map(quote => quote.folderId === folder.id ? { ...quote, folderId: '' } : quote) }));
+    if (historyFolderFilter === folder.id) setHistoryFolderFilter(ALL_FOLDERS);
+    notify('Cartella eliminata. I preventivi sono rimasti nell’archivio.');
+  };
+
   const doLogout = async () => {
     setUserMenu(false);
     try { const { error } = await withTimeout(supabase.auth.signOut(), 10000); if (error) throw error; }
@@ -668,6 +704,7 @@ export default function App() {
       return;
     }
     const next = newDraft(db);
+    if (view === 'history' && historyFolderFilter !== ALL_FOLDERS && historyFolderFilter !== NO_FOLDER) next.folderId = historyFolderFilter;
     next.lines = linesForCategory(next.category);
     setDraft(next); setView('editor'); setShowMobileMenu(false);
   };
@@ -817,7 +854,7 @@ export default function App() {
         return JSON.parse(JSON.stringify(snapshot));
       };
       const changedFields = existing ? [
-        ['number', 'Numero'], ['date', 'Data'], ['status', 'Stato'], ['category', 'Settore'], ['client', 'Cliente'],
+        ['number', 'Numero'], ['date', 'Data'], ['status', 'Stato'], ['category', 'Settore'], ['folderId', 'Cartella'], ['client', 'Cliente'],
         ['address', 'Indirizzo'], ['tax', 'Codice fiscale / P. IVA'], ['place', 'Località'],
         ['phone', 'Telefono'], ['email', 'E-mail'], ['pec', 'PEC'], ['title', 'Titolo'],
         ['subtitle', 'Specifiche'], ['intro', 'Testo introduttivo'], ['lines', 'Descrizioni lavori'],
@@ -844,7 +881,7 @@ export default function App() {
       const items = [...previous.items];
       for (const line of saved.lines) {
         if (line.desc && !items.some(item => item.cat === saved.category && escapeName(item.desc) === escapeName(line.desc))) {
-          items.unshift({ id: `i-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, cat: saved.category, desc: line.desc });
+          items.unshift({ id: `i-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, cat: saved.category, desc: line.desc, createdAt: now });
         }
       }
       return { ...previous, quotes, clients, items };
@@ -871,7 +908,7 @@ export default function App() {
     const desc = description.trim();
     if (!desc) return false;
     if (db.items.some(item => item.cat === category && escapeName(item.desc) === escapeName(desc))) { notify('Questa voce è già presente nel catalogo.'); return false; }
-    updateDb(previous => ({ ...previous, items: [{ id: `i-${Date.now()}`, cat: category, desc }, ...previous.items] }));
+    updateDb(previous => ({ ...previous, items: [{ id: `i-${Date.now()}`, cat: category, desc, createdAt: new Date().toISOString() }, ...previous.items] }));
     notify('Voce aggiunta al catalogo.'); return true;
   };
   const deleteCatalogItem = (item) => {
@@ -887,7 +924,7 @@ export default function App() {
   const importQuoteFile = async (file) => {
     if (!file) return;
     setImportBusy(true);
-    try { const extracted = await extractDocumentText(file, message => setToast(message)); setToast(''); setQuoteImport(parseQuoteText(extracted.text, file.name, db, { layoutLines: extracted.layoutLines, ocrUsed: extracted.ocrUsed, ocrWarning: extracted.ocrWarning })); }
+    try { const extracted = await extractDocumentText(file, message => setToast(message)); setToast(''); setQuoteImport({ ...parseQuoteText(extracted.text, file.name, db, { layoutLines: extracted.layoutLines, ocrUsed: extracted.ocrUsed, ocrWarning: extracted.ocrWarning }), folderId: historyFolderFilter !== ALL_FOLDERS && historyFolderFilter !== NO_FOLDER ? historyFolderFilter : '' }); }
     catch (error) { notify(error?.message || 'Impossibile leggere il documento.'); }
     finally { setImportBusy(false); }
   };
@@ -898,14 +935,14 @@ export default function App() {
     const existingSameQuote = db.quotes.some(q => String(q.number).trim().toLowerCase() === parsed.number.trim().toLowerCase() && escapeName(q.client) === escapeName(parsed.client));
     if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
     const net = Math.max(0, Number(parsed.total) || 0);
-    const quote = { ...newDraft(db), id, number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), quantity: String(l.quantity ?? ''), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
+    const quote = { ...newDraft(db), id, folderId: parsed.folderId || '', number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), quantity: String(l.quantity ?? ''), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
     if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate', quantity: '', internalPrice: null, showPrice: false }];
     const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
     updateDb(previous => {
       const clients = [...previous.clients]; const ci = clients.findIndex(c => escapeName(c.name) === escapeName(quote.client));
       const nextClient = { ...(ci >= 0 ? clients[ci] : {}), name: quote.client, address: quote.address, tax: quote.tax || (ci >= 0 ? clients[ci].tax || '' : ''), place: quote.place, phone: quote.phone || '', email: quote.email || '', pec: quote.pec || '' };
       if (ci >= 0) clients[ci] = nextClient; else clients.unshift(nextClient);
-      const items = [...previous.items]; for (const line of quote.lines) if (!items.some(item => item.cat === quote.category && escapeName(item.desc) === escapeName(line.desc))) items.unshift({ id: `i-imp-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, cat: quote.category, desc: line.desc });
+      const items = [...previous.items]; for (const line of quote.lines) if (!items.some(item => item.cat === quote.category && escapeName(item.desc) === escapeName(line.desc))) items.unshift({ id: `i-imp-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, cat: quote.category, desc: line.desc, createdAt: quote.importedAt });
       return { ...previous, quotes: [quote, ...previous.quotes], clients, items };
     });
     setQuoteImport(null); setView('history'); notify('Preventivo importato e aggiunto all’archivio senza sostituire i dati esistenti.');
@@ -975,13 +1012,29 @@ export default function App() {
     } catch (error) { setSyncState('error'); setSyncMessage(error.message || 'Sincronizzazione non riuscita.'); notify('Impossibile sincronizzare: controlla la configurazione Supabase.'); }
   };
 
-  const recentQuotes = useMemo(() => [...db.quotes].sort((a, b) => (b.updated || '').localeCompare(a.updated || '')).slice(0, 5), [db.quotes]);
+  const compareNames = (left, right) => String(left || '').localeCompare(String(right || ''), 'it', { sensitivity: 'base', numeric: true });
+  const compareDates = (left, right) => String(left || '').localeCompare(String(right || ''));
+  const sortQuotes = (quotes, sort) => [...quotes].sort((a, b) => {
+    if (sort === 'name-asc') return compareNames(a.client, b.client) || compareDates(b.date, a.date);
+    if (sort === 'name-desc') return compareNames(b.client, a.client) || compareDates(b.date, a.date);
+    if (sort === 'date-asc') return compareDates(a.date || a.updated, b.date || b.updated) || compareNames(a.client, b.client);
+    return compareDates(b.date || b.updated, a.date || a.updated) || compareNames(a.client, b.client);
+  });
+  const recentQuotes = useMemo(() => sortQuotes(db.quotes.filter(quote => dashboardCategory === 'Tutti' || quote.category === dashboardCategory), dashboardSort).slice(0, 5), [db.quotes, dashboardCategory, dashboardSort]);
   const historyQuotes = useMemo(() => {
     const term = historySearch.toLowerCase().trim();
-    return [...db.quotes].filter(q => [q.number, q.client, q.category, q.status].some(value => String(value || '').toLowerCase().includes(term)))
-      .sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
-  }, [db.quotes, historySearch]);
-  const catalogItems = useMemo(() => db.items.filter(item => (catalogFilter === 'Tutti' || item.cat === catalogFilter) && item.desc.toLowerCase().includes(catalogSearch.toLowerCase())), [db.items, catalogFilter, catalogSearch]);
+    const folderMatch = (quote) => historyFolderFilter === ALL_FOLDERS || (historyFolderFilter === NO_FOLDER ? !quote.folderId : quote.folderId === historyFolderFilter);
+    const filtered = db.quotes.filter(q => folderMatch(q) && (historyCategory === 'Tutti' || q.category === historyCategory) && [q.number, q.client, q.category, q.status, q.title].some(value => String(value || '').toLowerCase().includes(term)));
+    return sortQuotes(filtered, historySort);
+  }, [db.quotes, historySearch, historyCategory, historyFolderFilter, historySort]);
+  const catalogItems = useMemo(() => {
+    const filtered = db.items.filter(item => (catalogFilter === 'Tutti' || item.cat === catalogFilter) && item.desc.toLowerCase().includes(catalogSearch.toLowerCase()));
+    return filtered.sort((a, b) => {
+      if (catalogSort === 'date-asc') return compareDates(a.createdAt, b.createdAt) || compareNames(a.desc, b.desc);
+      if (catalogSort === 'date-desc') return compareDates(b.createdAt, a.createdAt) || compareNames(a.desc, b.desc);
+      return catalogSort === 'name-desc' ? compareNames(b.desc, a.desc) : compareNames(a.desc, b.desc);
+    });
+  }, [db.items, catalogFilter, catalogSearch, catalogSort]);
   // Unisce le voci del Catalogo lavori e quelle dei preventivi salvati,
   // mostrando esclusivamente elementi della categoria selezionata.
   const editorCatalogItems = useMemo(() => {
@@ -1010,7 +1063,20 @@ export default function App() {
       return true;
     });
   }, [db.items, db.quotes, draft?.category]);
-  const clientItems = useMemo(() => db.clients.filter(client => [client.name, client.address, client.tax, client.place, client.phone, client.email, client.pec].some(value => String(value || '').toLowerCase().includes(clientSearch.toLowerCase()))), [db.clients, clientSearch]);
+  const clientItems = useMemo(() => {
+    const filtered = db.clients.filter(client => {
+      const matchesSearch = [client.name, client.address, client.tax, client.place, client.phone, client.email, client.pec].some(value => String(value || '').toLowerCase().includes(clientSearch.toLowerCase()));
+      const related = db.quotes.filter(quote => escapeName(quote.client) === escapeName(client.name));
+      const matchesCategory = clientCategory === 'Tutti' || related.some(quote => quote.category === clientCategory);
+      return matchesSearch && matchesCategory;
+    });
+    return filtered.sort((a, b) => {
+      const latestFor = (client) => db.quotes.filter(quote => escapeName(quote.client) === escapeName(client.name)).map(quote => quote.date || quote.updated || '').sort().at(-1) || '';
+      if (clientSort === 'date-asc') return compareDates(latestFor(a), latestFor(b)) || compareNames(a.name, b.name);
+      if (clientSort === 'date-desc') return compareDates(latestFor(b), latestFor(a)) || compareNames(a.name, b.name);
+      return clientSort === 'name-desc' ? compareNames(b.name, a.name) : compareNames(a.name, b.name);
+    });
+  }, [db.clients, db.quotes, clientSearch, clientCategory, clientSort]);
 
   if (passwordRecovery) return <PasswordRecoveryScreen onComplete={async () => { const result = await supabase.auth.getUser(); if (result.error) throw result.error; setPasswordRecovery(false); if (result.data.user) await hydrateUser(result.data.user); }} />;
   if (booting) return <div className="app-loading"><span className="spinner spinner-dark" /><strong>Avvio di Preventivi Pro</strong><p>Verifica della sessione sicura…</p></div>;
@@ -1077,7 +1143,7 @@ export default function App() {
             <div className="stat-card"><div className="stat-card-top"><span>Valore preventivi</span><span className="stat-icon stat-icon-green"><Activity size={18} /></span></div><strong className="stat-money">{money(db.quotes.reduce((sum, quote) => sum + (Number(quote.total) || 0), 0))}</strong><small>Totale dei documenti salvati</small></div>
           </div>
           <div className="dashboard-grid">
-            <section className="surface recent-surface"><div className="section-heading"><div><h2>Attività recente</h2><p>I preventivi aggiornati più di recente</p></div><button className="button button-secondary button-small" onClick={() => setPage('history')}>Vedi archivio <ArrowRight size={15} /></button></div>
+            <section className="surface recent-surface"><div className="section-heading"><div><h2>Attività recente</h2><p>Filtra e ordina gli ultimi preventivi</p></div><button className="button button-secondary button-small" onClick={() => setPage('history')}>Vedi archivio <ArrowRight size={15} /></button></div><div className="list-controls dashboard-list-controls"><label><span>Settore</span><select value={dashboardCategory} onChange={e => setDashboardCategory(e.target.value)}><option>Tutti</option>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></label><label><span>Ordina</span><select value={dashboardSort} onChange={e => setDashboardSort(e.target.value)}><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option><option value="name-asc">Nome: A–Z</option><option value="name-desc">Nome: Z–A</option></select></label></div>
               {recentQuotes.length === 0 ? <EmptyState icon={FileText} title="Il tuo archivio è pronto" text="Crea il primo preventivo: le bozze e i documenti salvati compariranno qui." action="Crea un preventivo" onAction={createQuote} /> : <div className="recent-list">{recentQuotes.map(q => <div className="recent-row" key={q.id}><div className="recent-doc-icon"><FileText size={18} /></div><div className="recent-main"><strong>{q.client}</strong><span>{q.number} <i>·</i> {q.category}</span></div><div className="recent-amount"><strong>{money(q.total)}</strong><span>{formatDate(q.date)}</span></div><button className="icon-button recent-open" onClick={() => editQuote(q)} aria-label={`Apri ${q.number}`}><ArrowRight size={17} /></button></div>)}</div>}
             </section>
             <section className="surface quick-surface"><div className="section-heading"><div><h2>Accessi rapidi</h2><p>Le funzioni più usate</p></div></div>
@@ -1114,6 +1180,7 @@ export default function App() {
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">01</span><div><h2>Dati del documento</h2><p>Numero, settore, data e condizioni</p></div></div>
                 <div className="form-grid form-grid-three"><div className="field"><label htmlFor="q-number">Numero preventivo</label><input id="q-number" value={draft.number} onChange={e => updateDraft('number', e.target.value)} placeholder="P 01.26" /></div><div className="field"><label htmlFor="q-date">Data</label><input id="q-date" type="date" value={draft.date} onChange={e => updateDraft('date', e.target.value)} /></div><div className="field"><label htmlFor="q-status">Stato</label><select id="q-status" value={draft.status} onChange={e => updateDraft('status', e.target.value)}><option>Bozza</option><option>Inviato</option><option>Accettato</option><option>Rifiutato</option></select></div></div>
                 <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-category">Settore impiantistico</label><select id="q-category" value={draft.category} onChange={e => changeDraftCategory(e.target.value)}>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></div><div className="field"><label htmlFor="q-payment">Termini di pagamento</label><textarea id="q-payment" rows={2} value={draft.payment} onChange={e => updateDraft('payment', e.target.value)} placeholder="70% a conferma lavoro\n30% a completamento" /></div></div>
+                <div className="field quote-folder-field"><label htmlFor="q-folder">Cartella archivio</label><select id="q-folder" value={draft.folderId || ''} onChange={e => updateDraft('folderId', e.target.value)}><option value="">Senza cartella</option>{db.quoteFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">02</span><div><h2>Dati del cliente</h2><p>Le informazioni saranno conservate nella rubrica</p></div></div>
                 <div className="field"><label htmlFor="q-client">Nome / ragione sociale *</label><input id="q-client" list="client-suggestions" autoComplete="off" value={draft.client} onChange={e => { const value = e.target.value; updateDraft('client', value); const match = db.clients.find(c => escapeName(c.name) === escapeName(value)); if (match) setDraft(prev => ({ ...prev, client: value, address: match.address || '', tax: match.tax || '', place: match.place || '', phone: match.phone || '', email: match.email || '', pec: match.pec || '' })); }} placeholder="Es. Mario Rossi" /><datalist id="client-suggestions">{db.clients.map(c => <option value={c.name} key={c.name} />)}</datalist></div>
@@ -1145,22 +1212,23 @@ export default function App() {
         </>}
 
         {view === 'history' && <>
-          <div className="page-heading"><div><div className="eyebrow">ARCHIVIO DOCUMENTI</div><h1>Archivio preventivi</h1><p>Ritrova, modifica, duplica o stampa i documenti salvati.</p></div><div className="heading-actions"><label className="button button-secondary import-quote-label"><FilePlus2 size={17} /> {importBusy ? 'Lettura documento…' : 'Importa PDF / Word'}<input type="file" accept=".pdf,.doc,.docx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" disabled={importBusy} onChange={e => { importQuoteFile(e.target.files?.[0]); e.target.value = ''; }} /></label><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div></div>
-          <section className="surface table-surface"><div className="table-toolbar"><div className="table-count"><strong>{historyQuotes.length}</strong> <span>{historyQuotes.length === 1 ? 'preventivo' : 'preventivi'}</span></div><div className="search-field"><Search size={17} /><input value={historySearch} onChange={e => setHistorySearch(e.target.value)} placeholder="Cerca per numero, cliente, settore…" aria-label="Cerca preventivi" /><Filter size={15} className="search-filter-icon" /></div></div>
-            {historyQuotes.length === 0 ? <EmptyState icon={FileText} title={db.quotes.length ? 'Nessun risultato' : 'Ancora nessun preventivo'} text={db.quotes.length ? 'Prova a modificare la ricerca.' : 'I preventivi creati e salvati compariranno in questo archivio.'} action={db.quotes.length ? undefined : 'Crea un preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Documento</th><th>Cliente</th><th>Settore</th><th>Stato</th><th className="align-right">Totale</th><th className="align-right">Azioni</th></tr></thead><tbody>{historyQuotes.map(q => <tr key={q.id}><td><button className="table-primary-text" onClick={() => editQuote(q)}>{q.number}</button><span className="table-secondary-text">{formatDate(q.date)}</span></td><td><strong className="table-client">{q.client}</strong></td><td><span className="category-pill">{q.category}</span></td><td><span className={`status-pill status-${String(q.status || 'bozza').toLowerCase()}`}>{q.status || 'Bozza'}</span></td><td className="align-right total-cell">{money(q.total)}</td><td><div className="table-actions"><button className="icon-button" title="Apri" aria-label="Apri" onClick={() => editQuote(q)}><Pencil size={16} /></button><button className="icon-button" title="Duplica" aria-label="Duplica" onClick={() => duplicateQuote(q)}><Copy size={16} /></button><button className="icon-button danger-icon" title="Elimina" aria-label="Elimina" onClick={() => deleteQuote(q)}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>}
+          <div className="page-heading"><div><div className="eyebrow">ARCHIVIO DOCUMENTI</div><h1>Archivio preventivi</h1><p>Organizza i documenti in cartelle personalizzate, importali e ritrovali per data, cliente e settore.</p></div><div className="heading-actions"><label className="button button-secondary import-quote-label"><FilePlus2 size={17} /> {importBusy ? 'Lettura documento…' : 'Importa PDF / Word'}<input type="file" accept=".pdf,.doc,.docx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" disabled={importBusy} onChange={e => { importQuoteFile(e.target.files?.[0]); e.target.value = ''; }} /></label><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div></div>
+          <section className="surface folder-manager"><div className="folder-manager-heading"><div><h2><FolderOpen size={17}/> Le mie cartelle</h2><p>Crea cartelle per anno, cliente, cantiere o come preferisci. Eliminare una cartella non elimina i preventivi.</p></div><button className="button button-secondary button-small" onClick={createQuoteFolder}><FolderPlus size={15}/> Nuova cartella</button></div><div className="folder-tiles"><button type="button" className={`folder-tile${historyFolderFilter === ALL_FOLDERS ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(ALL_FOLDERS)}><FolderOpen size={18}/><span><strong>Tutti i preventivi</strong><small>{db.quotes.length} documenti</small></span></button><button type="button" className={`folder-tile${historyFolderFilter === NO_FOLDER ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(NO_FOLDER)}><Folder size={18}/><span><strong>Senza cartella</strong><small>{db.quotes.filter(quote => !quote.folderId).length} documenti</small></span></button>{db.quoteFolders.map(folder => <div className={`folder-tile-wrap${historyFolderFilter === folder.id ? ' active' : ''}`} key={folder.id}><button type="button" className={`folder-tile${historyFolderFilter === folder.id ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(folder.id)}><Folder size={18}/><span><strong>{folder.name}</strong><small>{db.quotes.filter(quote => quote.folderId === folder.id).length} documenti</small></span></button><div className="folder-tile-actions"><button type="button" className="icon-button" title={`Rinomina ${folder.name}`} aria-label={`Rinomina ${folder.name}`} onClick={() => renameQuoteFolder(folder)}><Pencil size={13}/></button><button type="button" className="icon-button danger-icon" title={`Elimina ${folder.name}`} aria-label={`Elimina ${folder.name}`} onClick={() => deleteQuoteFolder(folder)}><Trash2 size={13}/></button></div></div>)}</div></section>
+          <section className="surface table-surface"><div className="table-toolbar archive-toolbar"><div className="table-count"><strong>{historyQuotes.length}</strong> <span>{historyQuotes.length === 1 ? 'preventivo' : 'preventivi'}</span></div><div className="search-field"><Search size={17} /><input value={historySearch} onChange={e => setHistorySearch(e.target.value)} placeholder="Cerca per numero, cliente, settore…" aria-label="Cerca preventivi" /><Filter size={15} className="search-filter-icon" /></div><label className="compact-filter"><span>Settore</span><select value={historyCategory} onChange={e => setHistoryCategory(e.target.value)}><option>Tutti</option>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></label><label className="compact-filter"><span>Ordina</span><select value={historySort} onChange={e => setHistorySort(e.target.value)}><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option><option value="name-asc">Cliente: A–Z</option><option value="name-desc">Cliente: Z–A</option></select></label></div>
+            {historyQuotes.length === 0 ? <EmptyState icon={FileText} title={db.quotes.length ? 'Nessun risultato' : 'Ancora nessun preventivo'} text={db.quotes.length ? 'Prova a modificare la ricerca.' : 'I preventivi creati e salvati compariranno in questo archivio.'} action={db.quotes.length ? undefined : 'Crea un preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Documento</th><th>Cliente</th><th>Settore</th><th>Cartella</th><th>Stato</th><th className="align-right">Totale</th><th className="align-right">Azioni</th></tr></thead><tbody>{historyQuotes.map(q => <tr key={q.id}><td><button className="table-primary-text" onClick={() => editQuote(q)}>{q.number}</button><span className="table-secondary-text">{formatDate(q.date)}</span></td><td><strong className="table-client">{q.client}</strong></td><td><span className="category-pill">{q.category}</span></td><td>{db.quoteFolders.find(folder => folder.id === q.folderId)?.name || '—'}</td><td><span className={`status-pill status-${String(q.status || 'bozza').toLowerCase()}`}>{q.status || 'Bozza'}</span></td><td className="align-right total-cell">{money(q.total)}</td><td><div className="table-actions"><button className="icon-button" title="Apri" aria-label="Apri" onClick={() => editQuote(q)}><Pencil size={16} /></button><button className="icon-button" title="Duplica" aria-label="Duplica" onClick={() => duplicateQuote(q)}><Copy size={16} /></button><button className="icon-button danger-icon" title="Elimina" aria-label="Elimina" onClick={() => deleteQuote(q)}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>}
           </section>
         </>}
 
         {view === 'clients' && <>
           <div className="page-heading"><div><div className="eyebrow">ANAGRAFICA</div><h1>Clienti</h1><p>La rubrica si aggiorna quando salvi un preventivo.</p></div><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div>
-          <section className="surface table-surface"><div className="table-toolbar"><div className="table-count"><strong>{clientItems.length}</strong> <span>{clientItems.length === 1 ? 'cliente' : 'clienti'}</span></div><div className="search-field"><Search size={17} /><input value={clientSearch} onChange={e => setClientSearch(e.target.value)} placeholder="Cerca cliente o indirizzo…" aria-label="Cerca cliente" /></div></div>
+          <section className="surface table-surface"><div className="table-toolbar archive-toolbar"><div className="table-count"><strong>{clientItems.length}</strong> <span>{clientItems.length === 1 ? 'cliente' : 'clienti'}</span></div><div className="search-field"><Search size={17} /><input value={clientSearch} onChange={e => setClientSearch(e.target.value)} placeholder="Cerca cliente o indirizzo…" aria-label="Cerca cliente" /></div><label className="compact-filter"><span>Settore</span><select value={clientCategory} onChange={e => setClientCategory(e.target.value)}><option>Tutti</option>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></label><label className="compact-filter"><span>Ordina</span><select value={clientSort} onChange={e => setClientSort(e.target.value)}><option value="name-asc">Nome: A–Z</option><option value="name-desc">Nome: Z–A</option><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option></select></label></div>
             {clientItems.length === 0 ? <EmptyState icon={Users} title={db.clients.length ? 'Nessun cliente trovato' : 'La rubrica è vuota'} text={db.clients.length ? 'Prova a cambiare il testo della ricerca.' : 'Salva un preventivo con i dati del cliente per aggiungerlo automaticamente.'} action={db.clients.length ? undefined : 'Crea preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Cliente</th><th>Indirizzo</th><th>Codice fiscale / P. IVA</th><th>Preventivi</th><th /></tr></thead><tbody>{clientItems.map(client => <tr key={client.name}><td><div className="client-name-cell"><span className="avatar avatar-small"><UserRound size={15} /></span><strong>{client.name}</strong></div></td><td>{client.address || client.place || '—'}</td><td>{client.tax || '—'}</td><td><span className="category-pill">{db.quotes.filter(q => escapeName(q.client) === escapeName(client.name)).length} documenti</span></td><td><div className="table-actions"><button className="button button-secondary button-small" onClick={() => setEditingClient({ ...client, originalName: client.name })}><Pencil size={14} /> Modifica</button><button className="icon-button danger-icon" title="Elimina cliente" aria-label="Elimina cliente" onClick={() => deleteClient(client)}><Trash2 size={16} /></button><button className="button button-secondary button-small" onClick={() => createQuoteForClient(client)}>Crea preventivo</button></div></td></tr>)}</tbody></table></div>}
           </section>
         </>}
 
         {view === 'catalog' && <>
           <div className="page-heading"><div><div className="eyebrow">LAVORI RIUTILIZZABILI</div><h1>Catalogo lavori</h1><p>Salva descrizioni che usi spesso e richiamale nei prossimi preventivi.</p></div></div>
-          <CatalogManager items={catalogItems} total={db.items.length} search={catalogSearch} setSearch={setCatalogSearch} filter={catalogFilter} setFilter={setCatalogFilter} onAdd={addCatalogItem} onDelete={deleteCatalogItem} />
+          <CatalogManager items={catalogItems} total={db.items.length} search={catalogSearch} setSearch={setCatalogSearch} filter={catalogFilter} setFilter={setCatalogFilter} sort={catalogSort} setSort={setCatalogSort} onAdd={addCatalogItem} onDelete={deleteCatalogItem} />
         </>}
 
         {view === 'settings' && <>
@@ -1170,21 +1238,21 @@ export default function App() {
       </main>
       <footer className="app-footer"><span>© {new Date().getFullYear()} Chiaradia Impianti</span><span>Preventivi Pro <i>·</i> React + Supabase</span></footer>
     </div>
-    {quoteImport && <ImportQuoteModal initial={quoteImport} onClose={() => setQuoteImport(null)} onSave={saveImportedQuote} />}
+    {quoteImport && <ImportQuoteModal initial={quoteImport} folders={db.quoteFolders} onClose={() => setQuoteImport(null)} onSave={saveImportedQuote} />}
     {editingClient && <ClientEditModal client={editingClient} onClose={() => setEditingClient(null)} onSave={(client) => saveClient(client, editingClient.originalName)} />}
     <nav className="mobile-bottom-nav" aria-label="Navigazione rapida"><button className={view === 'home' ? 'active' : ''} onClick={() => setPage('home')}><Home size={19} /><span>Home</span></button><button className={view === 'history' ? 'active' : ''} onClick={() => setPage('history')}><FileText size={19} /><span>Archivio</span></button><button className="mobile-create" onClick={createQuote}><Plus size={24} /><span>Nuovo</span></button><button className={view === 'clients' ? 'active' : ''} onClick={() => setPage('clients')}><Users size={19} /><span>Clienti</span></button><button className={view === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}><Settings size={19} /><span>Altro</span></button></nav>
     {toast && <div className="toast-notification" role="status"><CheckCircle2 size={18} /><span>{toast}</span><button className="icon-button" onClick={() => setToast('')} aria-label="Chiudi messaggio"><X size={15} /></button></div>}
   </div>;
 }
 
-function CatalogManager({ items, total, search, setSearch, filter, setFilter, onAdd, onDelete }) {
+function CatalogManager({ items, total, search, setSearch, filter, setFilter, sort, setSort, onAdd, onDelete }) {
   const [addOpen, setAddOpen] = useState(false);
   const [category, setCategory] = useState(CATEGORIES[0]);
   const [description, setDescription] = useState('');
   const submit = (event) => { event.preventDefault(); if (onAdd(category, description)) { setDescription(''); setAddOpen(false); } };
   return <div className="catalog-layout"><section className="surface catalog-main"><div className="table-toolbar catalog-toolbar"><div className="table-count"><strong>{items.length}</strong> <span>di {total} voci</span></div><button className="button button-primary button-small" onClick={() => setAddOpen(!addOpen)}>{addOpen ? <X size={16} /> : <Plus size={16} />}{addOpen ? 'Annulla' : 'Aggiungi voce'}</button></div>
     {addOpen && <form className="catalog-add-form" onSubmit={submit}><div className="field"><label htmlFor="catalog-category">Settore</label><select id="catalog-category" value={category} onChange={e => setCategory(e.target.value)}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></div><div className="field"><label htmlFor="catalog-description">Descrizione</label><textarea autoFocus id="catalog-description" required rows={3} value={description} onChange={e => setDescription(e.target.value)} placeholder="Descrizione della fornitura o attività…" /></div><button className="button button-primary" type="submit"><Check size={16} /> Salva voce</button></form>}
-    <div className="catalog-filters"><div className="search-field"><Search size={17} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Cerca nel catalogo…" aria-label="Cerca catalogo" /></div><select value={filter} onChange={e => setFilter(e.target.value)} aria-label="Filtra settore"><option>Tutti</option>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></div>
+    <div className="catalog-filters"><div className="search-field"><Search size={17} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Cerca nel catalogo…" aria-label="Cerca catalogo" /></div><select value={filter} onChange={e => setFilter(e.target.value)} aria-label="Filtra settore"><option>Tutti</option>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select><select value={sort} onChange={e => setSort(e.target.value)} aria-label="Ordina catalogo"><option value="name-asc">Nome: A–Z</option><option value="name-desc">Nome: Z–A</option><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option></select></div>
     {items.length === 0 ? <EmptyState icon={BookOpen} title={total ? 'Nessuna voce trovata' : 'Costruiamo il tuo catalogo'} text={total ? 'Prova a cambiare la ricerca o il settore.' : 'Aggiungi le descrizioni che utilizzi più spesso. Le nuove voci saranno suggerite durante la compilazione.'} action={total ? undefined : 'Aggiungi prima voce'} onAction={() => setAddOpen(true)} /> : <div className="catalog-list">{items.map(item => <div className="catalog-row" key={item.id}><span className="catalog-item-icon"><FileText size={17} /></span><div className="catalog-row-copy"><strong>{item.desc}</strong><span>{item.cat}</span></div><button className="icon-button danger-icon" title="Elimina voce" aria-label={`Elimina ${item.desc}`} onClick={() => { if (window.confirm('Rimuovere questa descrizione dal catalogo?')) onDelete(item); }}><Trash2 size={16} /></button></div>)}</div>}
   </section><aside className="surface catalog-side"><span className="side-illustration"><BookOpen size={24} /></span><h2>Il tuo archivio di descrizioni</h2><p>Le descrizioni salvate sono riutilizzabili nei preventivi dello stesso settore e sincronizzate sul cloud.</p><div className="catalog-side-stat"><strong>{total}</strong><span>voci totali</span></div><div className="catalog-side-stat"><strong>{CATEGORIES.length}</strong><span>settori disponibili</span></div></aside></div>;
 }
@@ -1217,8 +1285,17 @@ function TrashAndTemplates({ db, onRestore, onDeleteForever, onSaveTemplate }) {
   const [category, setCategory] = useState(CATEGORIES[0]);
   const [templateText, setTemplateText] = useState('');
   const [unlocked, setUnlocked] = useState(false);
+  const [trashSort, setTrashSort] = useState('date-desc');
+  const [trashCategory, setTrashCategory] = useState('Tutti');
   const currentTemplate = db.settings?.categoryTemplates?.[category] || null;
-  const trash = Array.isArray(db.trash) ? [...db.trash].sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''))) : [];
+  const trash = Array.isArray(db.trash) ? db.trash
+    .filter(entry => trashCategory === 'Tutti' || (entry.type === 'quote' && entry.data?.category === trashCategory))
+    .sort((a, b) => {
+      if (trashSort === 'name-asc') return String(a.label || '').localeCompare(String(b.label || ''), 'it', { sensitivity: 'base', numeric: true });
+      if (trashSort === 'name-desc') return String(b.label || '').localeCompare(String(a.label || ''), 'it', { sensitivity: 'base', numeric: true });
+      if (trashSort === 'date-asc') return String(a.deletedAt || '').localeCompare(String(b.deletedAt || ''));
+      return String(b.deletedAt || '').localeCompare(String(a.deletedAt || ''));
+    }) : [];
   const suggestions = useMemo(() => {
     const counts = new Map();
     let order = 0;
@@ -1251,7 +1328,7 @@ function TrashAndTemplates({ db, onRestore, onDeleteForever, onSaveTemplate }) {
   return <div className="trash-template-layout">
     <section className="surface form-card">
       <div className="form-card-heading"><span className="settings-heading-icon"><Trash2 size={19} /></span><div><h2>Cestino</h2><p>Gli elementi eliminati vengono conservati qui finché non li ripristini o li elimini definitivamente.</p></div></div>
-      <div className="trash-count-row"><strong>{trash.length}</strong><span>{trash.length === 1 ? 'elemento eliminato' : 'elementi eliminati'}</span></div>
+      <div className="trash-count-row"><strong>{trash.length}</strong><span>{trash.length === 1 ? 'elemento eliminato' : 'elementi eliminati'}</span></div><div className="list-controls trash-list-controls"><label><span>Settore</span><select value={trashCategory} onChange={e => setTrashCategory(e.target.value)}><option>Tutti</option>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></label><label><span>Ordina</span><select value={trashSort} onChange={e => setTrashSort(e.target.value)}><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option><option value="name-asc">Nome: A–Z</option><option value="name-desc">Nome: Z–A</option></select></label></div>
       {trash.length === 0 ? <div className="empty-state compact-empty"><Trash2 size={24}/><strong>Il cestino è vuoto</strong><p>Preventivi, clienti e voci di catalogo che elimini compariranno qui.</p></div> : <div className="trash-list">{trash.map(entry => <div className="trash-item" key={entry.id}><div className="trash-item-copy"><strong>{entry.label}</strong><span>{typeLabel(entry)} · {entry.deletedAt ? new Date(entry.deletedAt).toLocaleString('it-IT') : 'data non disponibile'}</span></div><div className="trash-item-actions"><button type="button" className="button button-secondary button-small" onClick={() => onRestore(entry)}><RefreshCw size={14}/> Ripristina</button><button type="button" className="icon-button danger-icon" title="Elimina definitivamente" aria-label={`Elimina definitivamente ${entry.label}`} onClick={() => onDeleteForever(entry)}><Trash2 size={16}/></button></div></div>)}</div>}
     </section>
     <section className="surface form-card">
@@ -1268,11 +1345,11 @@ function TrashAndTemplates({ db, onRestore, onDeleteForever, onSaveTemplate }) {
   </div>;
 }
 
-function ImportQuoteModal({ initial, onClose, onSave }) {
-  const [form, setForm] = useState(() => ({ ...initial, lines: initial.lines.map(l => ({ ...l })), address: initial.address || '', tax: initial.tax || '', place: initial.place || '', title: initial.title || '', subtitle: initial.subtitle || '', intro: initial.intro || '', closing: initial.closing || '', payment: initial.payment || '', vatRate: initial.vatRate ?? 10 }));
+function ImportQuoteModal({ initial, folders = [], onClose, onSave }) {
+  const [form, setForm] = useState(() => ({ ...initial, lines: initial.lines.map(l => ({ ...l })), address: initial.address || '', tax: initial.tax || '', place: initial.place || '', title: initial.title || '', subtitle: initial.subtitle || '', intro: initial.intro || '', closing: initial.closing || '', payment: initial.payment || '', folderId: initial.folderId || '', vatRate: initial.vatRate ?? 10 }));
   const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const setLine = (index, value) => setForm(prev => ({ ...prev, lines: prev.lines.map((line, i) => i === index ? { ...line, desc: value } : line) }));
-  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Località / nota anagrafica</label><input value={form.place} onChange={e=>set('place',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Modello / specifiche</label><textarea rows={2} value={form.subtitle} onChange={e=>set('subtitle',e.target.value)} /></div><div className="field"><label>Testo introduttivo</label><textarea rows={3} value={form.intro} onChange={e=>set('intro',e.target.value)} /></div><div className="field"><label>Termini di pagamento</label><textarea rows={2} value={form.payment} onChange={e=>set('payment',e.target.value)} /></div><div className="field"><label>Altre condizioni / note finali</label><textarea rows={2} value={form.closing} onChange={e=>set('closing',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-quantity"><span>Q.tà</span><input type="text" inputMode="decimal" value={line.quantity ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,quantity:e.target.value}:item)}))} /></label><label className="import-line-price"><span>Costo interno (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',quantity:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><section className="surface import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title"><div className="modal-heading"><div><span className="eyebrow">IMPORTAZIONE DOCUMENTO</span><h2 id="import-modal-title">Controlla i dati riconosciuti</h2><p>Il documento originale non viene modificato. L'importazione aggiunge un nuovo preventivo, senza sostituire quelli già presenti.</p></div><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={20}/></button></div><div className="import-file-note"><FileText size={18}/><span>{form.fileName}</span></div>{form.warnings?.length > 0 && <div className="message message-info"><strong>Verifica manuale consigliata</strong><ul>{form.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}<div className="import-form-grid"><div className="field"><label>Cliente / ragione sociale *</label><input value={form.client} onChange={e=>set('client',e.target.value)} /></div><div className="field"><label>Numero preventivo</label><input value={form.number} onChange={e=>set('number',e.target.value)} /></div><div className="field"><label>Data emissione</label><input type="date" value={form.date} onChange={e=>set('date',e.target.value)} /></div><div className="field"><label>Settore</label><select value={form.category} onChange={e=>set('category',e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="field"><label>Cartella archivio</label><select value={form.folderId || ''} onChange={e=>set('folderId',e.target.value)}><option value="">Senza cartella</option>{folders.map(folder=><option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></div><div className="field"><label>Indirizzo cliente</label><input value={form.address} onChange={e=>set('address',e.target.value)} /></div><div className="field"><label>Codice fiscale / P. IVA</label><input value={form.tax} onChange={e=>set('tax',e.target.value)} /></div><div className="field"><label>Località / nota anagrafica</label><input value={form.place} onChange={e=>set('place',e.target.value)} /></div><div className="field"><label>Imponibile (€)</label><input type="number" min="0" step="0.01" value={form.total} onChange={e=>set('total',e.target.value)} /></div><div className="field"><label>IVA (%)</label><input type="number" min="0" max="100" step="0.1" value={form.vatRate} onChange={e=>set('vatRate',e.target.value)} /></div></div><div className="field"><label>Titolo del preventivo</label><textarea rows={2} value={form.title} onChange={e=>set('title',e.target.value)} /></div><div className="field"><label>Modello / specifiche</label><textarea rows={2} value={form.subtitle} onChange={e=>set('subtitle',e.target.value)} /></div><div className="field"><label>Testo introduttivo</label><textarea rows={3} value={form.intro} onChange={e=>set('intro',e.target.value)} /></div><div className="field"><label>Termini di pagamento</label><textarea rows={2} value={form.payment} onChange={e=>set('payment',e.target.value)} /></div><div className="field"><label>Altre condizioni / note finali</label><textarea rows={2} value={form.closing} onChange={e=>set('closing',e.target.value)} /></div><div className="field"><label>Voci descrittive rilevate (correggibili)</label>{form.lines.map((line,i)=><div className="import-line-row" key={i}><textarea className="import-line-edit" rows={2} value={line.desc} onChange={e=>setLine(i,e.target.value)} placeholder={`Voce ${i+1}`} /><label className="import-line-quantity"><span>Q.tà</span><input type="text" inputMode="decimal" value={line.quantity ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,quantity:e.target.value}:item)}))} /></label><label className="import-line-price"><span>Costo interno (€)</span><input type="number" min="0" step="0.01" value={line.amount ?? ''} onChange={e=>setForm(prev=>({...prev,lines:prev.lines.map((item,j)=>j===i?{...item,amount:e.target.value===''?null:Number(e.target.value)}:item)}))} /></label></div>)}<button type="button" className="button button-secondary button-small" onClick={()=>set('lines',[...form.lines,{desc:'',quantity:'',amount:null}])}><Plus size={14}/> Aggiungi voce</button></div><details className="import-raw-details"><summary>Mostra testo estratto dal documento</summary><pre>{form.rawText}</pre></details><div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Annulla</button><button className="button button-primary" onClick={()=>onSave(form)}><Check size={16}/> Importa nell’archivio</button></div></section></div>;
 }
 function ClientEditModal({ client, onClose, onSave }) {
   const [form, setForm] = useState({ name:client.name || '', address:client.address || '', tax:client.tax || '', place:client.place || '', phone:client.phone || '', email:client.email || '', pec:client.pec || '' });
