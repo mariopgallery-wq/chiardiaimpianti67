@@ -268,7 +268,7 @@ test('customer document renders a line price only when its per-line visibility s
   assert.match(documentComponent, /line\.desc/);
   assert.match(documentComponent, /line\.showPrice === true/);
   assert.match(documentComponent, /className="quote-work-price"/);
-  assert.match(documentComponent, /hasVisibleLinePrice && <td className="quote-work-price">/);
+  assert.match(documentComponent, /hasVisiblePrice && <td className="quote-work-price">/);
   assert.match(documentComponent, /money\(linePrice\)/);
 });
 
