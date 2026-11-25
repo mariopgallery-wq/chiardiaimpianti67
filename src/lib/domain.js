@@ -57,6 +57,9 @@ export function normalizeDb(value) {
       lines: Array.isArray(q.lines) ? q.lines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
         ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''), quantity: String(line.quantity ?? ''), showPrice: line.showPrice === true,
       })) : [],
+      extraLines: Array.isArray(q.extraLines) ? q.extraLines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
+        ...line, id: line.id || `legacy-extra-line-${index}-${lineIndex}`, desc: String(line.desc || ''), quantity: String(line.quantity ?? ''), showPrice: line.showPrice === true,
+      })) : [],
       net, vatRate,
       vat: Number.isFinite(Number(q.vat)) && q.vat !== undefined ? Number(q.vat) : vat,
       total: Number.isFinite(Number(q.total)) && q.total !== undefined ? Number(q.total) : Math.round((net + vat + Number.EPSILON) * 100) / 100,
@@ -75,22 +78,30 @@ export function normalizeDb(value) {
   return { quotes, items, clients, trash, quoteFolders, settings: { ...settings, defaultVat } };
 }
 
-export function quoteNumber(quotes = []) {
-  const year = String(new Date().getFullYear()).slice(-2);
-  const sameYear = (Array.isArray(quotes) ? quotes : []).map(q => String(q?.number || '')).filter(n => n.endsWith(`.${year}`));
-  const used = sameYear.map(n => Number(n.match(/^P\s*(\d+)/i)?.[1] || 0));
-  return `P ${String(Math.max(0, ...used) + 1).padStart(2, '0')}.${year}`;
+export function quoteNumber(quotes = [], date = todayISO()) {
+  const dateText = String(date || todayISO());
+  const yearMatch = dateText.match(/^(\d{4})/);
+  const year = (yearMatch ? yearMatch[1] : String(new Date().getFullYear())).slice(-2);
+  let highest = 0;
+  for (const quote of Array.isArray(quotes) ? quotes : []) {
+    // Accetta sia il formato precedente P 01.26 sia il formato progressivo P 1.26.
+    const match = String(quote?.number || '').trim().match(/^P\s*(\d+)\.(\d{2})$/i);
+    if (match && match[2] === year) highest = Math.max(highest, Number(match[1]) || 0);
+  }
+  return `P ${highest + 1}.${year}`;
 }
 
 export function newDraft(db = defaultDb()) {
   const settings = db?.settings || DEFAULT_SETTINGS;
+  const date = todayISO();
   return {
-    id: null, number: quoteNumber(db?.quotes), date: todayISO(), category: CATEGORIES[0], folderId: '',
+    id: null, number: quoteNumber(db?.quotes, date), date, category: CATEGORIES[0], folderId: '',
     status: 'Bozza', payment: settings.payment || '',
     client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
     title: '',
     subtitle: '', intro: '',
     lines: [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }],
+    extraLines: [],
     closing: '', net: 0, vatRate: Number(settings.defaultVat ?? DEFAULT_SETTINGS.defaultVat),
   };
 }
