@@ -304,7 +304,9 @@ test('quote folders and folder assignments survive workspace normalization', () 
   });
   assert.deepEqual(db.quoteFolders, [{ id: 'folder-2026', name: 'Cantieri 2026', createdAt: '2026-11-20T10:00:00.000Z' }]);
   assert.equal(db.quotes[0].folderId, 'folder-2026');
+  assert.equal(db.quotes[0].extraIntro, '');
   assert.equal(normalizeDb({ quotes: [{ client: 'Anna' }] }).quotes[0].folderId, '');
+  assert.equal(normalizeDb({ quotes: [{ client: 'Anna', extraIntro: 'Richieste in corso d’opera' }] }).quotes[0].extraIntro, 'Richieste in corso d’opera');
 });
 
 test('currency formatting places the euro symbol before the amount', () => {
@@ -329,6 +331,9 @@ test('additional work rows are editable, saved, normalized and shown in the prin
   assert.match(app, /Modifiche e lavorazioni aggiuntive/);
   assert.match(app, /extra-internal-price-/);
   assert.match(app, /renderWorkTable\(visibleExtraLines, 'extra-work-table'\)/);
+  assert.match(app, /q-extra-intro/);
+  assert.match(app, /quote-extra-intro/);
+  assert.match(domain, /extraIntro: String\(q\.extraIntro \|\| ''\)/);
   assert.match(domain, /extraLines: Array\.isArray\(q\.extraLines\)/);
   assert.match(domain, /extraLines: \[\]/);
 });
