@@ -408,6 +408,47 @@ test('does not assign the supplier VAT number to a customer when supplier and cu
   assert.equal(result.address, 'Via Roma 10');
 });
 
+test('imports the additional-work section and its introductory note separately from planned work', () => {
+  const result = extractStructuredBody([
+    'Preventivo per fornitura e posa in opera',
+    'Installazione impianto elettrico',
+    'Modifiche e lavorazioni aggiuntive',
+    'Le seguenti lavorazioni sono state richieste dal cliente in corso d’opera.',
+    'Descrizione Q.tà Prezzo',
+    'Rubinetto 1 € 200,00',
+    'Termosifone 1 € 200,00',
+  ], { settings: { defaultVat: 10 } });
+  assert.ok(result.lines.some(line => line.desc === 'Installazione impianto elettrico'));
+  assert.equal(result.lines.some(line => /Rubinetto|Termosifone/.test(line.desc)), false);
+  assert.match(result.extraIntro, /richieste dal cliente in corso d’opera/i);
+  assert.ok(result.extraLines.some(line => line.desc.startsWith('Rubinetto')));
+  assert.ok(result.extraLines.some(line => line.desc.startsWith('Termosifone')));
+});
+
+test('imports the additional-work introduction through the complete plain-text import pipeline', () => {
+  const text = `Preventivo n. P 47.26
+Data: 25/11/2026
+Cliente: Mario Rossi
+ARTICOLO IMPORTO
+Preventivo per fornitura e posa in opera
+Installazione impianto elettrico
+Modifiche e lavorazioni aggiuntive
+Le seguenti lavorazioni sono state richieste dal cliente in corso d’opera e non erano comprese negli accordi iniziali.
+Descrizione Q.tà Prezzo
+Rubinetto 1 € 200,00
+Termosifone 1 € 200,00
+Totale imponibile: 400,00 €
+IVA (0%): 0,00 €
+Totale: 400,00 €`;
+  const result = parseQuoteText(text, 'preventivo-con-extra.docx', { settings: { defaultVat: 10 } });
+  assert.ok(result.lines.some(line => line.desc === 'Installazione impianto elettrico'));
+  assert.match(result.extraIntro, /richieste dal cliente in corso d’opera/i);
+  assert.deepEqual(result.extraLines.map(line => [line.desc, line.quantity, line.amount]), [
+    ['Rubinetto 1', '', 200],
+    ['Termosifone 1', '', 200],
+  ], 'plain-text import must not guess a quantity from an unlabelled number');
+});
+
 test('does not reuse supplier VAT in a plain-text import when the customer has no tax identifier', () => {
   const text = `CHIARADIA IMPIANTI\nP. IVA 08623720722\nROSSI SRL\nVia Roma 10\nData: 30/10/2026\nARTICOLO IMPORTO\nInstallazione impianto elettrico\nTotale imponibile: 1.000,00 €`;
   const result = parseQuoteText(text, 'rossi.docx', { settings: { defaultVat: 10 } });
