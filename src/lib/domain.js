@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS = {
 };
 
 export function defaultDb() {
-  return { quotes: [], items: [], clients: [], trash: [], settings: { ...DEFAULT_SETTINGS, categoryTemplates: {} } };
+  return { quotes: [], items: [], clients: [], trash: [], quoteFolders: [], settings: { ...DEFAULT_SETTINGS, categoryTemplates: {} } };
 }
 
 export function todayISO() {
@@ -35,6 +35,9 @@ export function normalizeDb(value) {
   const settings = { ...DEFAULT_SETTINGS, categoryTemplates: {}, ...(d.settings && typeof d.settings === 'object' && !Array.isArray(d.settings) ? d.settings : {}) };
   if (String(settings.payment || '').trim() === '70% a conferma lavoro\n30% a completamento') settings.payment = '';
   if (!settings.categoryTemplates || typeof settings.categoryTemplates !== 'object' || Array.isArray(settings.categoryTemplates)) settings.categoryTemplates = {};
+  const quoteFolders = Array.isArray(d.quoteFolders) ? d.quoteFolders.filter(folder => folder && typeof folder === 'object' && !Array.isArray(folder)).map((folder, index) => ({
+    ...folder, id: String(folder.id || `folder-${index}`), name: String(folder.name || '').trim(), createdAt: String(folder.createdAt || ''),
+  })).filter(folder => folder.name) : [];
   const quotes = Array.isArray(d.quotes) ? d.quotes.filter(q => q && typeof q === 'object' && !Array.isArray(q)).map((q, index) => {
     const net = Math.max(0, Number(q.net) || 0);
     const vatRate = Math.min(100, Math.max(0, Number(q.vatRate ?? settings.defaultVat) || 0));
@@ -50,6 +53,7 @@ export function normalizeDb(value) {
       title: ['Preventivo per fornitura e posa in opera di', 'Preventivo per fornitura e posa in opera'].includes(String(q.title || '').trim()) ? '' : String(q.title || ''),
       subtitle: String(q.subtitle || ''), intro: String(q.intro || '').trim() === 'Si precisa quanto segue:' ? '' : String(q.intro || ''), closing: String(q.closing || ''),
       payment: String(q.payment ?? settings.payment ?? DEFAULT_SETTINGS.payment),
+      folderId: String(q.folderId || ''),
       lines: Array.isArray(q.lines) ? q.lines.filter(line => line && typeof line === 'object' && !Array.isArray(line)).map((line, lineIndex) => ({
         ...line, id: line.id || `legacy-line-${index}-${lineIndex}`, desc: String(line.desc || ''), quantity: String(line.quantity ?? ''), showPrice: line.showPrice === true,
       })) : [],
@@ -60,7 +64,7 @@ export function normalizeDb(value) {
     };
   }) : [];
   const items = Array.isArray(d.items) ? d.items.filter(item => item && typeof item === 'object' && !Array.isArray(item)).map((item, index) => ({
-    ...item, id: item.id || `legacy-item-${index}`, cat: CATEGORIES.includes(item.cat) ? item.cat : CATEGORIES[0], desc: String(item.desc || ''),
+    ...item, id: item.id || `legacy-item-${index}`, cat: CATEGORIES.includes(item.cat) ? item.cat : CATEGORIES[0], desc: String(item.desc || ''), createdAt: String(item.createdAt || ''),
   })) : [];
   const clients = Array.isArray(d.clients) ? d.clients.filter(client => client && typeof client === 'object' && !Array.isArray(client)).map(client => ({
     ...client, name: String(client.name || ''), address: String(client.address || ''), tax: String(client.tax || ''), place: String(client.place || ''),
@@ -68,7 +72,7 @@ export function normalizeDb(value) {
   })).filter(client => client.name.trim()) : [];
   const defaultVat = Math.min(100, Math.max(0, Number(settings.defaultVat) || 0));
   const trash = Array.isArray(d.trash) ? d.trash.filter(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && ['quote', 'client', 'catalog'].includes(entry.type) && entry.data && typeof entry.data === 'object').map((entry, index) => ({ ...entry, id: String(entry.id || `trash-${index}`), type: entry.type, label: String(entry.label || entry.data.number || entry.data.name || entry.data.desc || 'Elemento eliminato'), deletedAt: String(entry.deletedAt || '') })) : [];
-  return { quotes, items, clients, trash, settings: { ...settings, defaultVat } };
+  return { quotes, items, clients, trash, quoteFolders, settings: { ...settings, defaultVat } };
 }
 
 export function quoteNumber(quotes = []) {
@@ -81,7 +85,7 @@ export function quoteNumber(quotes = []) {
 export function newDraft(db = defaultDb()) {
   const settings = db?.settings || DEFAULT_SETTINGS;
   return {
-    id: null, number: quoteNumber(db?.quotes), date: todayISO(), category: CATEGORIES[0],
+    id: null, number: quoteNumber(db?.quotes), date: todayISO(), category: CATEGORIES[0], folderId: '',
     status: 'Bozza', payment: settings.payment || '',
     client: '', address: '', tax: '', place: '', phone: '', email: '', pec: '',
     title: '',
@@ -99,7 +103,7 @@ export function calcTotal(draft = {}) {
 }
 
 export function money(value) {
-  const amount = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0);
+  const amount = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: true }).format(Number(value) || 0);
   return `€ ${amount}`;
 }
 
