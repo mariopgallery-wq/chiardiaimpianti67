@@ -394,11 +394,38 @@ function QuoteDocument({ draft, settings }) {
   const sums = calcTotal(draft);
   const logoSrc = settings.logoData || LOGO_URL;
   const visibleLines = (draft.lines || []).filter(line => String(line.desc || '').trim());
-  const hasQuantity = visibleLines.some(line => String(line.quantity ?? '').trim() !== '');
-  const hasVisibleLinePrice = visibleLines.some(line => {
-    const value = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
-    return line.showPrice === true && value !== null && value !== '' && Number.isFinite(Number(value));
-  });
+  const visibleExtraLines = (Array.isArray(draft.extraLines) ? draft.extraLines : []).filter(line => String(line.desc || '').trim());
+  const renderWorkTable = (rows, tableKey, keepEmptyRow = false) => {
+    const hasQuantity = rows.some(line => String(line.quantity ?? '').trim() !== '');
+    const hasVisiblePrice = rows.some(line => {
+      const value = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
+      return line.showPrice === true && value !== null && value !== '' && Number.isFinite(Number(value));
+    });
+    return <table key={tableKey} className={`quote-work-table${hasQuantity ? ' has-quantity' : ''}${hasVisiblePrice ? ' has-price' : ''}`}>
+      <colgroup>
+        <col className="quote-col-description" />
+        {hasQuantity && <col className="quote-col-quantity" />}
+        {hasVisiblePrice && <col className="quote-col-price" />}
+      </colgroup>
+      <thead><tr>
+        <th scope="col">Descrizione</th>
+        {hasQuantity && <th scope="col" className="quote-quantity-heading">Q.tà</th>}
+        {hasVisiblePrice && <th scope="col" className="quote-price-heading">Prezzo</th>}
+      </tr></thead>
+      <tbody>
+        {rows.map(line => {
+          const linePrice = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
+          const canShowPrice = hasVisiblePrice && line.showPrice === true && linePrice !== null && linePrice !== '' && Number.isFinite(Number(linePrice));
+          return <tr key={line.id}>
+            <td className="quote-work-description">{line.desc}</td>
+            {hasQuantity && <td className="quote-work-quantity">{String(line.quantity ?? '').trim()}</td>}
+            {hasVisiblePrice && <td className="quote-work-price">{canShowPrice ? money(linePrice) : ''}</td>}
+          </tr>;
+        })}
+        {!rows.length && keepEmptyRow && <tr><td colSpan={1 + Number(hasQuantity) + Number(hasVisiblePrice)}>&nbsp;</td></tr>}
+      </tbody>
+    </table>;
+  };
   return <article className="quote-document" id="quote-document">
     <header className="quote-doc-header">
       <div className="quote-company">
@@ -437,30 +464,11 @@ function QuoteDocument({ draft, settings }) {
       {draft.subtitle && <div className="quote-subtitle-text">{draft.subtitle}</div>}
       {draft.intro && <p className="quote-intro">{draft.intro}</p>}
     </section>
-    <table className={`quote-work-table${hasQuantity ? ' has-quantity' : ''}${hasVisibleLinePrice ? ' has-price' : ''}`}>
-      <colgroup>
-        <col className="quote-col-description" />
-        {hasQuantity && <col className="quote-col-quantity" />}
-        {hasVisibleLinePrice && <col className="quote-col-price" />}
-      </colgroup>
-      <thead><tr>
-        <th scope="col">Descrizione</th>
-        {hasQuantity && <th scope="col" className="quote-quantity-heading">Q.tà</th>}
-        {hasVisibleLinePrice && <th scope="col" className="quote-price-heading">Prezzo</th>}
-      </tr></thead>
-      <tbody>
-        {visibleLines.map(line => {
-          const linePrice = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null);
-          const canShowPrice = hasVisibleLinePrice && line.showPrice === true && linePrice !== null && linePrice !== '' && Number.isFinite(Number(linePrice));
-          return <tr key={line.id}>
-            <td className="quote-work-description">{line.desc}</td>
-            {hasQuantity && <td className="quote-work-quantity">{String(line.quantity ?? '').trim()}</td>}
-            {hasVisibleLinePrice && <td className="quote-work-price">{canShowPrice ? money(linePrice) : ''}</td>}
-          </tr>;
-        })}
-        {!visibleLines.length && <tr><td colSpan={1 + Number(hasQuantity) + Number(hasVisibleLinePrice)}>&nbsp;</td></tr>}
-      </tbody>
-    </table>
+    {renderWorkTable(visibleLines, 'main-work-table', true)}
+    {visibleExtraLines.length > 0 && <>
+      <div className="quote-work-band quote-extra-work-band">Modifiche e lavorazioni aggiuntive</div>
+      {renderWorkTable(visibleExtraLines, 'extra-work-table')}
+    </>}
     {draft.closing && <div className="quote-closing">{draft.closing}</div>}
     <footer className="quote-doc-footer">
       <div className="quote-signatures"><div>Data</div><div>Firma</div></div>
@@ -510,6 +518,8 @@ export default function App() {
   const lineDragTimer = useRef(null);
   const lineDragRef = useRef(null);
   const [draggingLineId, setDraggingLineId] = useState(null);
+  const [draggingQuoteId, setDraggingQuoteId] = useState(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState(null);
   const latestDbRef = useRef(db);
 
   useEffect(() => {
@@ -679,6 +689,35 @@ export default function App() {
     if (historyFolderFilter === folder.id) setHistoryFolderFilter(ALL_FOLDERS);
     notify('Cartella eliminata. I preventivi sono rimasti nell’archivio.');
   };
+  const moveQuoteToFolder = (quoteId, folderId) => {
+    const quote = db.quotes.find(item => item.id === quoteId);
+    if (!quote) return;
+    const nextFolderId = folderId || '';
+    if (quote.folderId === nextFolderId) return;
+    updateDb(previous => ({ ...previous, quotes: previous.quotes.map(item => item.id === quoteId ? { ...item, folderId: nextFolderId } : item) }));
+    setHistoryFolderFilter(nextFolderId || NO_FOLDER);
+    const targetName = nextFolderId ? (db.quoteFolders.find(folder => folder.id === nextFolderId)?.name || 'cartella') : 'Senza cartella';
+    notify(`Preventivo ${quote.number || ''} spostato in “${targetName}”.`);
+  };
+  const handleFolderDragOver = (event, folderId) => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    setDragOverFolderId(folderId);
+  };
+  const handleFolderDragLeave = (event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setDragOverFolderId(null);
+  };
+  const handleFolderDrop = (event, folderId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const quoteId = event.dataTransfer?.getData('text/plain') || draggingQuoteId;
+    setDragOverFolderId(null);
+    setDraggingQuoteId(null);
+    if (!quoteId) return;
+    const quote = db.quotes.find(item => item.id === quoteId);
+    if (!quote) return;
+    moveQuoteToFolder(quoteId, folderId === NO_FOLDER ? '' : folderId);
+  };
 
   const doLogout = async () => {
     setUserMenu(false);
@@ -757,7 +796,7 @@ export default function App() {
       return;
     }
     if (!confirmReplaceDraft('aprire il preventivo selezionato')) return;
-    setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null }] });
+    setDraft({ ...newDraft(db), ...quote, lines: (quote.lines || []).length ? quote.lines.map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) : [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null }], extraLines: (quote.extraLines || []).map(line => ({ ...line, internalPrice: line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? null), desc: String(line.desc || '') })) });
     setView('editor'); setShowMobileMenu(false);
   };
   const updateDraft = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
@@ -834,16 +873,20 @@ export default function App() {
   });
   const addLine = () => setDraft(previous => ({ ...previous, lines: [...previous.lines, { id: `l${Date.now()}${Math.random()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }] }));
   const removeLine = (id) => setDraft(previous => ({ ...previous, lines: previous.lines.length > 1 ? previous.lines.filter(line => line.id !== id) : [{ id: `l${Date.now()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }] }));
+  const addExtraLine = () => setDraft(previous => ({ ...previous, extraLines: [...(previous.extraLines || []), { id: `x${Date.now()}${Math.random()}`, desc: '', quantity: '', internalPrice: null, showPrice: false }] }));
+  const updateExtraLine = (id, patch) => setDraft(previous => ({ ...previous, extraLines: (previous.extraLines || []).map(line => line.id === id ? { ...line, ...patch } : line) }));
+  const removeExtraLine = (id) => setDraft(previous => ({ ...previous, extraLines: (previous.extraLines || []).filter(line => line.id !== id) }));
 
   const saveQuote = () => {
     if (!draft.client.trim()) { notify('Inserisci il nome del cliente prima di salvare.'); return; }
-    const hasWorkDescription = draft.lines.some(line => String(line.desc || '').trim()) || String(draft.subtitle || '').trim() || (String(draft.title || '').trim() && String(draft.title).trim() !== 'Preventivo per fornitura e posa in opera di');
+    const hasWorkDescription = draft.lines.some(line => String(line.desc || '').trim()) || (draft.extraLines || []).some(line => String(line.desc || '').trim()) || String(draft.subtitle || '').trim() || (String(draft.title || '').trim() && String(draft.title).trim() !== 'Preventivo per fornitura e posa in opera di');
     if (!hasWorkDescription) { notify('Inserisci almeno una descrizione del lavoro o una specifica prima di salvare.'); return; }
     const sums = calcTotal(draft);
     const now = new Date().toISOString();
-    const quote = { ...draft, id: draft.id || `q-${Date.now()}`, number: draft.number || quoteNumber(db.quotes), client: draft.client.trim(), net: sums.net,
+    const quote = { ...draft, id: draft.id || `q-${Date.now()}`, number: draft.number || quoteNumber(db.quotes, draft.date), client: draft.client.trim(), net: sums.net,
       vatRate: sums.rate, vat: sums.vat, total: sums.total, updated: now,
       lines: draft.lines.map(line => { const { amount: legacyAmount, ...rest } = line; const internalPrice = line.internalPrice !== undefined ? line.internalPrice : (legacyAmount ?? null); return { ...rest, internalPrice: internalPrice === '' ? null : (internalPrice == null ? null : Math.max(0, Number(internalPrice) || 0)), desc: String(line.desc || '').trim() }; }).filter(line => line.desc),
+      extraLines: (draft.extraLines || []).map(line => { const { amount: legacyAmount, ...rest } = line; const internalPrice = line.internalPrice !== undefined ? line.internalPrice : (legacyAmount ?? null); return { ...rest, internalPrice: internalPrice === '' ? null : (internalPrice == null ? null : Math.max(0, Number(internalPrice) || 0)), desc: String(line.desc || '').trim() }; }).filter(line => line.desc),
     };
     updateDb(previous => {
       const quotes = [...previous.quotes];
@@ -857,7 +900,7 @@ export default function App() {
         ['number', 'Numero'], ['date', 'Data'], ['status', 'Stato'], ['category', 'Settore'], ['folderId', 'Cartella'], ['client', 'Cliente'],
         ['address', 'Indirizzo'], ['tax', 'Codice fiscale / P. IVA'], ['place', 'Località'],
         ['phone', 'Telefono'], ['email', 'E-mail'], ['pec', 'PEC'], ['title', 'Titolo'],
-        ['subtitle', 'Specifiche'], ['intro', 'Testo introduttivo'], ['lines', 'Descrizioni lavori'],
+        ['subtitle', 'Specifiche'], ['intro', 'Testo introduttivo'], ['lines', 'Descrizioni lavori'], ['extraLines', 'Modifiche e lavorazioni aggiuntive'],
         ['closing', 'Note finali'], ['net', 'Imponibile'], ['vatRate', 'Aliquota IVA'], ['payment', 'Pagamento'],
       ].filter(([key]) => JSON.stringify(existing[key] ?? null) !== JSON.stringify(quote[key] ?? null)).map(([, label]) => label) : ['Creazione preventivo'];
       const revisions = existing ? [...(Array.isArray(existing.revisions) ? existing.revisions : []), {
@@ -879,7 +922,7 @@ export default function App() {
       const client = { name: saved.client, address: saved.address || '', tax: saved.tax || '', place: saved.place || '', phone: saved.phone || '', email: saved.email || '', pec: saved.pec || '' };
       if (clientIndex >= 0) clients[clientIndex] = client; else clients.unshift(client);
       const items = [...previous.items];
-      for (const line of saved.lines) {
+      for (const line of [...saved.lines, ...(saved.extraLines || [])]) {
         if (line.desc && !items.some(item => item.cat === saved.category && escapeName(item.desc) === escapeName(line.desc))) {
           items.unshift({ id: `i-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, cat: saved.category, desc: line.desc, createdAt: now });
         }
@@ -897,7 +940,8 @@ export default function App() {
   };
   const duplicateQuote = (quote) => {
     if (!confirmReplaceDraft('duplicare il preventivo selezionato')) return;
-    const copy = { ...quote, id: null, number: quoteNumber(db.quotes), date: todayISO(), status: 'Bozza', lines: (quote.lines || []).map(line => ({ ...line, id: `l${Date.now()}${Math.random()}` })) };
+    const date = todayISO();
+    const copy = { ...quote, id: null, number: quoteNumber(db.quotes, date), date, status: 'Bozza', lines: (quote.lines || []).map(line => ({ ...line, id: `l${Date.now()}${Math.random()}` })), extraLines: (quote.extraLines || []).map(line => ({ ...line, id: `x${Date.now()}${Math.random()}` })) };
     setDraft(copy); setView('editor'); notify('Copia pronta da modificare.');
   };
   const saveSettings = (settings) => {
@@ -935,7 +979,8 @@ export default function App() {
     const existingSameQuote = db.quotes.some(q => String(q.number).trim().toLowerCase() === parsed.number.trim().toLowerCase() && escapeName(q.client) === escapeName(parsed.client));
     if (existingSameQuote && !window.confirm(`Esiste già un preventivo ${parsed.number} per ${parsed.client}. Vuoi importarlo comunque come nuovo documento?`)) return;
     const net = Math.max(0, Number(parsed.total) || 0);
-    const quote = { ...newDraft(db), id, folderId: parsed.folderId || '', number: parsed.number.trim() || quoteNumber(db.quotes), date: parsed.date || todayISO(), category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), quantity: String(l.quantity ?? ''), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
+    const importDate = parsed.date || todayISO();
+    const quote = { ...newDraft(db), id, folderId: parsed.folderId || '', number: parsed.number.trim() || quoteNumber(db.quotes, importDate), date: importDate, category: parsed.category || CATEGORIES[0], status: 'Importato', client: parsed.client.trim(), address: parsed.address || clientMatch?.address || '', tax: parsed.tax || clientMatch?.tax || '', place: parsed.place || clientMatch?.place || '', phone: parsed.phone || clientMatch?.phone || '', email: parsed.email || clientMatch?.email || '', pec: parsed.pec || clientMatch?.pec || '', title: parsed.title || '', subtitle: parsed.subtitle || '', intro: parsed.intro || '', closing: parsed.closing || '', payment: parsed.payment || db.settings.payment, lines: (parsed.lines || []).filter(l => l.desc.trim()).map((l,i) => ({ id: `imp-${Date.now()}-${i}`, desc: l.desc.trim(), quantity: String(l.quantity ?? ''), internalPrice: l.amount !== null && l.amount !== undefined && l.amount !== '' ? Math.max(0, Number(l.amount) || 0) : null, showPrice: false })), extraLines: [], net, vatRate: Number(parsed.vatRate ?? db.settings.defaultVat), importedFrom: parsed.fileName, importedAt: new Date().toISOString(), importRawText: parsed.rawText?.slice(0, 30000) };
     if (!quote.lines.length) quote.lines = [{ id: `imp-${Date.now()}`, desc: 'Verificare e completare le descrizioni importate', quantity: '', internalPrice: null, showPrice: false }];
     const sums = calcTotal(quote); quote.net = sums.net; quote.vat = sums.vat; quote.total = sums.total; quote.updated = new Date().toISOString();
     updateDb(previous => {
@@ -1017,6 +1062,12 @@ export default function App() {
   const sortQuotes = (quotes, sort) => [...quotes].sort((a, b) => {
     if (sort === 'name-asc') return compareNames(a.client, b.client) || compareDates(b.date, a.date);
     if (sort === 'name-desc') return compareNames(b.client, a.client) || compareDates(b.date, a.date);
+    if (sort === 'number-asc' || sort === 'number-desc') {
+      const parseNumber = quote => { const match = String(quote.number || '').match(/^P\s*(\d+)\.(\d{2})$/i); return match ? { year: Number(match[2]), sequence: Number(match[1]) } : { year: 0, sequence: 0 }; };
+      const left = parseNumber(a); const right = parseNumber(b);
+      const order = left.year - right.year || left.sequence - right.sequence;
+      return sort === 'number-asc' ? order : -order;
+    }
     if (sort === 'date-asc') return compareDates(a.date || a.updated, b.date || b.updated) || compareNames(a.client, b.client);
     return compareDates(b.date || b.updated, a.date || a.updated) || compareNames(a.client, b.client);
   });
@@ -1049,7 +1100,7 @@ export default function App() {
       }));
     const quoteEntries = (Array.isArray(db.quotes) ? db.quotes : [])
       .filter(quote => quote && quote.category === category)
-      .flatMap((quote, quoteIndex) => (Array.isArray(quote.lines) ? quote.lines : [])
+      .flatMap((quote, quoteIndex) => [...(Array.isArray(quote.lines) ? quote.lines : []), ...(Array.isArray(quote.extraLines) ? quote.extraLines : [])]
         .map((line, lineIndex) => ({
           id: `quote-${category}-${quote.id || quoteIndex}-${line.id || lineIndex}`,
           cat: category,
@@ -1178,7 +1229,7 @@ export default function App() {
           <div className="editor-layout">
             <div className="edit-panel">
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">01</span><div><h2>Dati del documento</h2><p>Numero, settore, data e condizioni</p></div></div>
-                <div className="form-grid form-grid-three"><div className="field"><label htmlFor="q-number">Numero preventivo</label><input id="q-number" value={draft.number} onChange={e => updateDraft('number', e.target.value)} placeholder="P 01.26" /></div><div className="field"><label htmlFor="q-date">Data</label><input id="q-date" type="date" value={draft.date} onChange={e => updateDraft('date', e.target.value)} /></div><div className="field"><label htmlFor="q-status">Stato</label><select id="q-status" value={draft.status} onChange={e => updateDraft('status', e.target.value)}><option>Bozza</option><option>Inviato</option><option>Accettato</option><option>Rifiutato</option></select></div></div>
+                <div className="form-grid form-grid-three"><div className="field"><label htmlFor="q-number">Numero preventivo</label><input id="q-number" value={draft.number} onChange={e => updateDraft('number', e.target.value)} placeholder="P 1.26" /></div><div className="field"><label htmlFor="q-date">Data</label><input id="q-date" type="date" value={draft.date} onChange={e => { const date = e.target.value; setDraft(previous => ({ ...previous, date, ...(previous.id ? {} : { number: quoteNumber(db.quotes, date) }) })); }} /></div><div className="field"><label htmlFor="q-status">Stato</label><select id="q-status" value={draft.status} onChange={e => updateDraft('status', e.target.value)}><option>Bozza</option><option>Inviato</option><option>Accettato</option><option>Rifiutato</option></select></div></div>
                 <div className="form-grid form-grid-two"><div className="field"><label htmlFor="q-category">Settore impiantistico</label><select id="q-category" value={draft.category} onChange={e => changeDraftCategory(e.target.value)}>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></div><div className="field"><label htmlFor="q-payment">Termini di pagamento</label><textarea id="q-payment" rows={2} value={draft.payment} onChange={e => updateDraft('payment', e.target.value)} placeholder="70% a conferma lavoro\n30% a completamento" /></div></div>
                 <div className="field quote-folder-field"><label htmlFor="q-folder">Cartella archivio</label><select id="q-folder" value={draft.folderId || ''} onChange={e => updateDraft('folderId', e.target.value)}><option value="">Senza cartella</option>{db.quoteFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></div>
               </section>
@@ -1198,7 +1249,10 @@ export default function App() {
                 <div className="field"><label htmlFor="q-subtitle">Modello, quantità o specifica (facoltativo)</label><input id="q-subtitle" value={draft.subtitle} onChange={e => updateDraft('subtitle', e.target.value)} placeholder="Es. climatizzatore mono split Hisense Console 18000 BTU A++" /></div>
                 <div className="field"><label htmlFor="q-intro">Testo introduttivo (facoltativo)</label><textarea id="q-intro" rows={4} maxLength={4000} value={draft.intro} onChange={e => updateDraft('intro', e.target.value)} placeholder="Si precisa quanto segue…" /></div>
                 <div className="line-items-heading"><div><strong>Attività incluse</strong><span>{draft.lines.filter(line => String(line.desc || '').trim()).length} voci compilate · tieni premuto il numero per trascinare; Alt + ↑ / ↓ per spostare</span></div><button className="button button-secondary button-small" onClick={addLine}><Plus size={15} /> Aggiungi voce</button></div>
-                <div className="description-lines">{draft.lines.map((line, index) => { const options = editorCatalogItems; return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" title="Tieni premuto il numero per trascinare; Alt + freccia su/giù per spostare" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onLostPointerCapture={finishLineDrag} onKeyDown={e => { if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); moveLineByKeyboard(line.id, -1); } else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); moveLineByKeyboard(line.id, 1); } }} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}{item.cat ? ` · ${item.cat}` : ''}</option>)}</select></div><label className="line-quantity-editor">Q.tà<input type="text" inputMode="decimal" aria-label={`Quantità voce ${index + 1}`} value={line.quantity ?? ''} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,quantity:e.target.value}:item)}))} placeholder="—" /></label><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Prezzo €</label><div className="line-price-controls"><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /><button type="button" className={`icon-button line-price-visibility${line.showPrice === true ? ' is-visible' : ''}`} aria-label={line.showPrice === true ? `Nascondi il prezzo della voce ${index + 1} nella stampa` : `Mostra il prezzo della voce ${index + 1} nella stampa`} aria-pressed={line.showPrice === true} title={line.showPrice === true ? 'Prezzo visibile nella stampa: fai clic per nasconderlo' : 'Prezzo nascosto nella stampa: fai clic per mostrarlo'} onClick={()=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,showPrice:item.showPrice!==true}:item)}))}>{line.showPrice === true ? <Eye size={16}/> : <EyeOff size={16}/>}</button></div><span className={`line-price-state${line.showPrice === true ? ' is-visible' : ''}`}>{line.showPrice === true ? 'Visibile in stampa' : 'Nascosto in stampa'}</span></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div><div className="internal-cost-summary"><span>Somma dei prezzi delle attività</span><strong>{money(draft.lines.reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round((draft.lines.reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei costi interni copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
+                <div className="description-lines">{draft.lines.map((line, index) => { const options = editorCatalogItems; return <div className={`description-line${draggingLineId === line.id ? ' is-dragging' : ''}`} data-line-id={line.id} key={line.id}><button type="button" className="description-bullet description-drag-handle" aria-label={`Trascina la voce ${index + 1}`} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" title="Tieni premuto il numero per trascinare; Alt + freccia su/giù per spostare" onPointerDown={e => startLineDrag(e, line.id)} onPointerMove={moveLineDrag} onPointerUp={finishLineDrag} onPointerCancel={finishLineDrag} onLostPointerCapture={finishLineDrag} onKeyDown={e => { if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); moveLineByKeyboard(line.id, -1); } else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); moveLineByKeyboard(line.id, 1); } }} onContextMenu={e => { if (lineDragRef.current?.active) e.preventDefault(); }}>{index + 1}</button><div className="line-input-wrap"><textarea aria-label={`Descrizione lavoro ${index + 1}`} rows={2} list={`suggestions-${line.id}`} value={line.desc} onChange={e => updateLine(line.id, e.target.value)} placeholder="Descrivi una lavorazione o una fornitura…" /><datalist id={`suggestions-${line.id}`}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce dal catalogo" value="" onChange={e => { if (e.target.value) updateLine(line.id, e.target.value); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}{item.cat ? ` · ${item.cat}` : ''}</option>)}</select></div><label className="line-quantity-editor">Q.tà<input type="text" inputMode="decimal" aria-label={`Quantità voce ${index + 1}`} value={line.quantity ?? ''} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,quantity:e.target.value}:item)}))} placeholder="—" /></label><div className="import-editor-line-price"><label htmlFor={`internal-price-${line.id}`}>Prezzo €</label><div className="line-price-controls"><input id={`internal-price-${line.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={line.internalPrice !== undefined ? (line.internalPrice ?? '') : (line.amount ?? '')} onChange={e=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,internalPrice:e.target.value===''?null:Math.max(0,Number(e.target.value)||0)}:item)}))} /><button type="button" className={`icon-button line-price-visibility${line.showPrice === true ? ' is-visible' : ''}`} aria-label={line.showPrice === true ? `Nascondi il prezzo della voce ${index + 1} nella stampa` : `Mostra il prezzo della voce ${index + 1} nella stampa`} aria-pressed={line.showPrice === true} title={line.showPrice === true ? 'Prezzo visibile nella stampa: fai clic per nasconderlo' : 'Prezzo nascosto nella stampa: fai clic per mostrarlo'} onClick={()=>setDraft(prev=>({...prev,lines:prev.lines.map(item=>item.id===line.id?{...item,showPrice:item.showPrice!==true}:item)}))}>{line.showPrice === true ? <Eye size={16}/> : <EyeOff size={16}/>}</button></div><span className={`line-price-state${line.showPrice === true ? ' is-visible' : ''}`}>{line.showPrice === true ? 'Visibile in stampa' : 'Nascosto in stampa'}</span></div><button className="icon-button remove-line" onClick={() => removeLine(line.id)} title="Rimuovi voce" aria-label="Rimuovi voce"><X size={17} /></button></div>; })}</div>
+                <div className="line-items-heading extra-line-items-heading"><div><strong>Modifiche e lavorazioni aggiuntive</strong><span>Attività non previste inizialmente, concordate o svolte durante i lavori · {(draft.extraLines || []).filter(line => String(line.desc || '').trim()).length} voci</span></div><button type="button" className="button button-secondary button-small" onClick={addExtraLine}><Plus size={15} /> Aggiungi voce aggiuntiva</button></div>
+                {(draft.extraLines || []).length === 0 ? <p className="extra-lines-empty">Nessuna modifica o lavorazione aggiuntiva inserita.</p> : <div className="description-lines extra-description-lines">{(draft.extraLines || []).map((line, index) => { const options = editorCatalogItems; const priceValue = line.internalPrice !== undefined ? line.internalPrice : (line.amount ?? ''); return <div className="description-line extra-description-line" key={line.id}><span className="description-bullet extra-line-number">+{index + 1}</span><div className="line-input-wrap"><textarea aria-label={'Descrizione modifica aggiuntiva ' + (index + 1)} rows={2} list={'extra-suggestions-' + line.id} value={line.desc} onChange={e => updateExtraLine(line.id, { desc: e.target.value })} placeholder="Descrivi la modifica o la lavorazione aggiuntiva…" /><datalist id={'extra-suggestions-' + line.id}>{options.map(item => <option value={item.desc} key={item.id} />)}</datalist><select className="insert-suggestion" aria-label="Inserisci una voce aggiuntiva dal catalogo" value="" onChange={e => { if (e.target.value) updateExtraLine(line.id, { desc: e.target.value }); }}><option value="">{options.length > 0 ? 'Inserisci dal catalogo…' : 'Catalogo vuoto — aggiungi voci nel catalogo lavori'}</option>{options.map(item => <option value={item.desc} key={item.id}>{item.desc}{item.cat ? ' · ' + item.cat : ''}</option>)}</select></div><label className="line-quantity-editor">Q.tà<input type="text" inputMode="decimal" aria-label={'Quantità modifica aggiuntiva ' + (index + 1)} value={line.quantity ?? ''} onChange={e => updateExtraLine(line.id, { quantity: e.target.value })} placeholder="—" /></label><div className="import-editor-line-price"><label htmlFor={'extra-internal-price-' + line.id}>Prezzo €</label><div className="line-price-controls"><input id={'extra-internal-price-' + line.id} type="number" min="0" step="0.01" inputMode="decimal" value={priceValue} onChange={e => updateExtraLine(line.id, { internalPrice: e.target.value === '' ? null : Math.max(0, Number(e.target.value) || 0) })} /><button type="button" className={'icon-button line-price-visibility' + (line.showPrice === true ? ' is-visible' : '')} aria-label={line.showPrice === true ? 'Nascondi il prezzo della modifica ' + (index + 1) + ' nella stampa' : 'Mostra il prezzo della modifica ' + (index + 1) + ' nella stampa'} aria-pressed={line.showPrice === true} title={line.showPrice === true ? 'Prezzo visibile nella stampa: fai clic per nasconderlo' : 'Prezzo nascosto nella stampa: fai clic per mostrarlo'} onClick={() => updateExtraLine(line.id, { showPrice: line.showPrice !== true })}>{line.showPrice === true ? <Eye size={16}/> : <EyeOff size={16}/>}</button></div><span className={'line-price-state' + (line.showPrice === true ? ' is-visible' : '')}>{line.showPrice === true ? 'Visibile in stampa' : 'Nascosto in stampa'}</span></div><button type="button" className="icon-button remove-line" onClick={() => removeExtraLine(line.id)} title="Rimuovi modifica aggiuntiva" aria-label="Rimuovi modifica aggiuntiva"><X size={17} /></button></div>; })}</div>}
+                <div className="internal-cost-summary"><span>Somma dei prezzi delle attività e delle modifiche</span><strong>{money([...draft.lines, ...(draft.extraLines || [])].reduce((sum, line) => sum + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0))}</strong><button type="button" className="button button-secondary button-small" onClick={() => { const sum = Math.round(([...draft.lines, ...(draft.extraLines || [])].reduce((acc, line) => acc + Math.max(0, Number(line.internalPrice !== undefined ? line.internalPrice : line.amount) || 0), 0) + Number.EPSILON) * 100) / 100; updateDraft('net', sum); notify('Somma dei prezzi di attività e modifiche copiata nel campo imponibile; controlla il valore prima di salvare.'); }}>Usa come imponibile</button></div>
                 <div className="field closing-field"><label htmlFor="q-closing">Altre condizioni / note finali</label><textarea id="q-closing" rows={3} value={draft.closing} onChange={e => updateDraft('closing', e.target.value)} placeholder="Es. escluso opere murarie, tracce e ripristini…" /></div>
               </section>
               <section className="surface form-card"><div className="form-card-heading"><span className="form-step">04</span><div><h2>Riepilogo economico</h2><p>Un solo imponibile complessivo, IVA configurabile</p></div></div>
@@ -1213,9 +1267,9 @@ export default function App() {
 
         {view === 'history' && <>
           <div className="page-heading"><div><div className="eyebrow">ARCHIVIO DOCUMENTI</div><h1>Archivio preventivi</h1><p>Organizza i documenti in cartelle personalizzate, importali e ritrovali per data, cliente e settore.</p></div><div className="heading-actions"><label className="button button-secondary import-quote-label"><FilePlus2 size={17} /> {importBusy ? 'Lettura documento…' : 'Importa PDF / Word'}<input type="file" accept=".pdf,.doc,.docx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" disabled={importBusy} onChange={e => { importQuoteFile(e.target.files?.[0]); e.target.value = ''; }} /></label><button className="button button-primary" onClick={createQuote}><Plus size={17} /> Nuovo preventivo</button></div></div>
-          <section className="surface folder-manager"><div className="folder-manager-heading"><div><h2><FolderOpen size={17}/> Le mie cartelle</h2><p>Crea cartelle per anno, cliente, cantiere o come preferisci. Eliminare una cartella non elimina i preventivi.</p></div><button className="button button-secondary button-small" onClick={createQuoteFolder}><FolderPlus size={15}/> Nuova cartella</button></div><div className="folder-tiles"><button type="button" className={`folder-tile${historyFolderFilter === ALL_FOLDERS ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(ALL_FOLDERS)}><FolderOpen size={18}/><span><strong>Tutti i preventivi</strong><small>{db.quotes.length} documenti</small></span></button><button type="button" className={`folder-tile${historyFolderFilter === NO_FOLDER ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(NO_FOLDER)}><Folder size={18}/><span><strong>Senza cartella</strong><small>{db.quotes.filter(quote => !quote.folderId).length} documenti</small></span></button>{db.quoteFolders.map(folder => <div className={`folder-tile-wrap${historyFolderFilter === folder.id ? ' active' : ''}`} key={folder.id}><button type="button" className={`folder-tile${historyFolderFilter === folder.id ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(folder.id)}><Folder size={18}/><span><strong>{folder.name}</strong><small>{db.quotes.filter(quote => quote.folderId === folder.id).length} documenti</small></span></button><div className="folder-tile-actions"><button type="button" className="icon-button" title={`Rinomina ${folder.name}`} aria-label={`Rinomina ${folder.name}`} onClick={() => renameQuoteFolder(folder)}><Pencil size={13}/></button><button type="button" className="icon-button danger-icon" title={`Elimina ${folder.name}`} aria-label={`Elimina ${folder.name}`} onClick={() => deleteQuoteFolder(folder)}><Trash2 size={13}/></button></div></div>)}</div></section>
-          <section className="surface table-surface"><div className="table-toolbar archive-toolbar"><div className="table-count"><strong>{historyQuotes.length}</strong> <span>{historyQuotes.length === 1 ? 'preventivo' : 'preventivi'}</span></div><div className="search-field"><Search size={17} /><input value={historySearch} onChange={e => setHistorySearch(e.target.value)} placeholder="Cerca per numero, cliente, settore…" aria-label="Cerca preventivi" /><Filter size={15} className="search-filter-icon" /></div><label className="compact-filter"><span>Settore</span><select value={historyCategory} onChange={e => setHistoryCategory(e.target.value)}><option>Tutti</option>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></label><label className="compact-filter"><span>Ordina</span><select value={historySort} onChange={e => setHistorySort(e.target.value)}><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option><option value="name-asc">Cliente: A–Z</option><option value="name-desc">Cliente: Z–A</option></select></label></div>
-            {historyQuotes.length === 0 ? <EmptyState icon={FileText} title={db.quotes.length ? 'Nessun risultato' : 'Ancora nessun preventivo'} text={db.quotes.length ? 'Prova a modificare la ricerca.' : 'I preventivi creati e salvati compariranno in questo archivio.'} action={db.quotes.length ? undefined : 'Crea un preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Documento</th><th>Cliente</th><th>Settore</th><th>Cartella</th><th>Stato</th><th className="align-right">Totale</th><th className="align-right">Azioni</th></tr></thead><tbody>{historyQuotes.map(q => <tr key={q.id}><td><button className="table-primary-text" onClick={() => editQuote(q)}>{q.number}</button><span className="table-secondary-text">{formatDate(q.date)}</span></td><td><strong className="table-client">{q.client}</strong></td><td><span className="category-pill">{q.category}</span></td><td>{db.quoteFolders.find(folder => folder.id === q.folderId)?.name || '—'}</td><td><span className={`status-pill status-${String(q.status || 'bozza').toLowerCase()}`}>{q.status || 'Bozza'}</span></td><td className="align-right total-cell">{money(q.total)}</td><td><div className="table-actions"><button className="icon-button" title="Apri" aria-label="Apri" onClick={() => editQuote(q)}><Pencil size={16} /></button><button className="icon-button" title="Duplica" aria-label="Duplica" onClick={() => duplicateQuote(q)}><Copy size={16} /></button><button className="icon-button danger-icon" title="Elimina" aria-label="Elimina" onClick={() => deleteQuote(q)}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>}
+          <section className="surface folder-manager"><div className="folder-manager-heading"><div><h2><FolderOpen size={17}/> Le mie cartelle</h2><p>Crea cartelle per anno, cliente o cantiere. Trascina una riga dell’archivio su una cartella per spostare il preventivo; eliminare una cartella non elimina i documenti.</p></div><button className="button button-secondary button-small" onClick={createQuoteFolder}><FolderPlus size={15}/> Nuova cartella</button></div><div className="folder-tiles"><button type="button" className={`folder-tile${historyFolderFilter === ALL_FOLDERS ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(ALL_FOLDERS)}><FolderOpen size={18}/><span><strong>Tutti i preventivi</strong><small>{db.quotes.length} documenti</small></span></button><button type="button" className={`folder-tile${historyFolderFilter === NO_FOLDER ? ' active' : ''}${dragOverFolderId === NO_FOLDER ? ' is-drop-target' : ''}`} onClick={() => setHistoryFolderFilter(NO_FOLDER)} onDragOver={event => handleFolderDragOver(event, NO_FOLDER)} onDragLeave={handleFolderDragLeave} onDrop={event => handleFolderDrop(event, NO_FOLDER)}><Folder size={18}/><span><strong>Senza cartella</strong><small>{db.quotes.filter(quote => !quote.folderId).length} documenti</small></span></button>{db.quoteFolders.map(folder => <div className={`folder-tile-wrap${historyFolderFilter === folder.id ? ' active' : ''}${dragOverFolderId === folder.id ? ' is-drop-target' : ''}`} key={folder.id} onDragOver={event => handleFolderDragOver(event, folder.id)} onDragLeave={handleFolderDragLeave} onDrop={event => handleFolderDrop(event, folder.id)}><button type="button" className={`folder-tile${historyFolderFilter === folder.id ? ' active' : ''}`} onClick={() => setHistoryFolderFilter(folder.id)}><Folder size={18}/><span><strong>{folder.name}</strong><small>{db.quotes.filter(quote => quote.folderId === folder.id).length} documenti</small></span></button><div className="folder-tile-actions"><button type="button" className="icon-button" title={`Rinomina ${folder.name}`} aria-label={`Rinomina ${folder.name}`} onClick={() => renameQuoteFolder(folder)}><Pencil size={13}/></button><button type="button" className="icon-button danger-icon" title={`Elimina ${folder.name}`} aria-label={`Elimina ${folder.name}`} onClick={() => deleteQuoteFolder(folder)}><Trash2 size={13}/></button></div></div>)}</div></section>
+          <section className="surface table-surface"><div className="table-toolbar archive-toolbar"><div className="table-count"><strong>{historyQuotes.length}</strong> <span>{historyQuotes.length === 1 ? 'preventivo' : 'preventivi'}</span></div><div className="search-field"><Search size={17} /><input value={historySearch} onChange={e => setHistorySearch(e.target.value)} placeholder="Cerca per numero, cliente, settore…" aria-label="Cerca preventivi" /><Filter size={15} className="search-filter-icon" /></div><label className="compact-filter"><span>Settore</span><select value={historyCategory} onChange={e => setHistoryCategory(e.target.value)}><option>Tutti</option>{CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}</select></label><label className="compact-filter"><span>Ordina</span><select value={historySort} onChange={e => setHistorySort(e.target.value)}><option value="date-desc">Data: più recente</option><option value="date-asc">Data: meno recente</option><option value="name-asc">Cliente: A–Z</option><option value="name-desc">Cliente: Z–A</option><option value="number-asc">Numero: progressivo</option><option value="number-desc">Numero: decrescente</option></select></label></div>
+            {historyQuotes.length === 0 ? <EmptyState icon={FileText} title={db.quotes.length ? 'Nessun risultato' : 'Ancora nessun preventivo'} text={db.quotes.length ? 'Prova a modificare la ricerca.' : 'I preventivi creati e salvati compariranno in questo archivio.'} action={db.quotes.length ? undefined : 'Crea un preventivo'} onAction={createQuote} /> : <div className="responsive-table-wrap"><table className="data-table"><thead><tr><th>Documento</th><th>Cliente</th><th>Settore</th><th>Cartella</th><th>Stato</th><th className="align-right">Totale</th><th className="align-right">Azioni</th></tr></thead><tbody>{historyQuotes.map(q => <tr key={q.id} draggable onDragStart={event => { setDraggingQuoteId(q.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', q.id); }} onDragEnd={() => { setDraggingQuoteId(null); setDragOverFolderId(null); }} className={draggingQuoteId === q.id ? 'is-dragging-quote' : ''} title="Trascina questo preventivo su una cartella per spostarlo"><td><button className="table-primary-text" onClick={() => editQuote(q)}>{q.number}</button><span className="table-secondary-text">{formatDate(q.date)}</span></td><td><strong className="table-client">{q.client}</strong></td><td><span className="category-pill">{q.category}</span></td><td><select className="quote-folder-select" aria-label={'Cartella del preventivo ' + q.number} value={q.folderId || ''} onChange={event => moveQuoteToFolder(q.id, event.target.value)}><option value="">Senza cartella</option>{db.quoteFolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></td><td><span className={`status-pill status-${String(q.status || 'bozza').toLowerCase()}`}>{q.status || 'Bozza'}</span></td><td className="align-right total-cell">{money(q.total)}</td><td><div className="table-actions"><button className="icon-button" title="Apri" aria-label="Apri" onClick={() => editQuote(q)}><Pencil size={16} /></button><button className="icon-button" title="Duplica" aria-label="Duplica" onClick={() => duplicateQuote(q)}><Copy size={16} /></button><button className="icon-button danger-icon" title="Elimina" aria-label="Elimina" onClick={() => deleteQuote(q)}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>}
           </section>
         </>}
 
